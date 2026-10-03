@@ -31,7 +31,11 @@ from artemis.utils.visualization import format_minimal_list_with_elements
 
 
 @mcp.tool()
-async def mobile_get_device_state(view_type: str, device_serial: str | None = None) -> str:
+async def mobile_get_device_state(
+    view_type: str,
+    device_serial: str | None = None,
+    platform: str | None = None,
+) -> str:
     """Real-time mobile device state observer (for debugging and validation).
 
     Retrieves a real-time screenshot or a simplified UI element tree from the
@@ -44,20 +48,32 @@ async def mobile_get_device_state(view_type: str, device_serial: str | None = No
             returns the image's local file URI.
           - "hierarchy": returns the simplified text-labeled element list —
             exactly what the automation subagent sees when making decisions.
-        device_serial: Optional device serial (e.g. "emulator-5554") to inspect
-          a specific device; omitted → the default connected device. With
-          several devices attached, confirm the target with the user
-          (`adb devices -l` lists serials).
+        device_serial: Optional device serial (e.g. "emulator-5554", or an iOS
+          simulator UDID with platform="ios") to inspect a specific device;
+          omitted → the default connected device.
+        platform: "android" (default) or "ios". For iOS, device_serial is a
+          simulator UDID; omit it to use the single booted simulator.
     """
     try:
-        controller = _get_controller(device_serial=device_serial)
-        device_width = controller.ctx.device.device_width
-        device_height = controller.ctx.device.device_height
+        controller = _get_controller(
+            device_serial=device_serial,
+            **({"target_platform": platform} if platform else {}),
+        )
+        is_ios = str(getattr(controller.ctx.device, "mobile_platform", "android")).lower() == "ios"
     except Exception as e:
-        return f"Error: Failed to initialize/lock Android device controller: {e}"
+        return f"Error: Failed to initialize/lock device controller: {e}"
 
     try:
+        if is_ios:
+            # The native Xcode session opens lazily; connect before observing.
+            await controller._driver.connect()
         device_data = await controller.get_screen_data()
+        if is_ios:
+            # Real capture dims supersede the provisional ctx placeholders.
+            controller.ctx.device.device_width = device_data.width
+            controller.ctx.device.device_height = device_data.height
+        device_width = controller.ctx.device.device_width
+        device_height = controller.ctx.device.device_height
         latest_screenshot_b64 = device_data.base64
         xml_hierarchy = device_data.elements
 
@@ -69,7 +85,8 @@ async def mobile_get_device_state(view_type: str, device_serial: str | None = No
             safe_device_id = "".join(
                 [c if c.isalnum() or c in ("-", "_") else "_" for c in device_id]
             )
-            screenshot_filename = f"live_screenshot_{safe_device_id}.jpg"
+            ext = "png" if is_ios else "jpg"
+            screenshot_filename = f"live_screenshot_{safe_device_id}.{ext}"
             screenshot_path = os.path.join(project_root, screenshot_filename)
 
             with open(screenshot_path, "wb") as f:

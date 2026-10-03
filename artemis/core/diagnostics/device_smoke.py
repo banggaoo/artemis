@@ -96,8 +96,39 @@ def _uiautomator_fix(serial: str | None) -> list[str]:
     ]
 
 
-def fix_for_error(error: str | None, serial: str | None) -> list[str]:
+def _ios_fix_for_error(error: str | None, serial: str | None) -> list[str]:
+    """iOS Simulator repair steps (simctl/Xcode instead of adb/UIAutomator)."""
+    s = serial or "<UDID>"
+    text = (error or "").lower()
+    if "busy" in text or "another task" in text:
+        return [
+            "Wait for the running task to finish, or stop it with mobile_manage_task(action='stop', ...).",
+            "Then rerun the smoke test.",
+        ]
+    if "approv" in text or "authoriz" in text or "permission" in text:
+        return [
+            "Approve Artemis's agent access in Xcode (the first run opens a workspace approval prompt; choose persistent approval).",
+            "Confirm the permitted agent and workspace under Xcode > Settings > Agentic Tools.",
+        ]
+    if "xcode" in text or "macos" in text or "darwin" in text:
+        return [
+            "Install Xcode 27 or later and select it: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer",
+        ]
+    if "simulator" in text or "udid" in text or "boot" in text or "not available" in text:
+        return [
+            f"List simulators: xcrun simctl list devices; boot one with: xcrun simctl boot {s}",
+            "Create a simulator in Xcode > Settings > Platforms if none exist.",
+        ]
+    return [
+        "Check native capture manually: xcrun simctl io booted screenshot /tmp/ios.png",
+        'Verify Xcode MCP access: echo \'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\' | xcrun mcpbridge',
+    ]
+
+
+def fix_for_error(error: str | None, serial: str | None, platform: str = "android") -> list[str]:
     """Map an error string to concrete repair steps (substring match, case-insensitive)."""
+    if platform.lower() == "ios":
+        return _ios_fix_for_error(error, serial)
     if not error:
         return []
     text = error.lower()
@@ -260,15 +291,20 @@ def _decoded_length(b64: Any) -> int | None:
 
 
 async def smoke_test_device(
-    device_serial: str | None = None, timeout_seconds: float = 20.0
+    device_serial: str | None = None,
+    timeout_seconds: float = 20.0,
+    platform: str = "android",
 ) -> dict[str, Any]:
     """Observe the device exactly like ``mobile_get_device_state`` and report a verdict.
+
+    ``platform="ios"`` exercises the native Xcode 27 simulator path
+    (``simctl`` + mcpbridge session) instead of ADB/UIAutomator.
 
     Never raises. Returns::
 
         {"ok": bool, "serial": str | None, "elapsed_seconds": float,
          "screenshot_bytes": int | None, "element_count": int | None,
-         "hierarchy_backend": "helper" | "uiautomator" | None,
+         "hierarchy_backend": "helper" | "uiautomator" | "xcode" | None,
          "error": str | None, "fix": list[str]}
     """
     started = time.monotonic()
@@ -289,7 +325,9 @@ async def smoke_test_device(
         result["elapsed_seconds"] = round(time.monotonic() - started, 3)
         result["error"] = error
         result["ok"] = error is None
-        result["fix"] = fix_for_error(cause if cause is not None else error, result["serial"])
+        result["fix"] = fix_for_error(
+            cause if cause is not None else error, result["serial"], platform
+        )
         return result
 
     busy = _find_busy_owner(requested_serial)
@@ -303,11 +341,17 @@ async def smoke_test_device(
             " skipping the screen capture so the running task is not disturbed."
         )
 
+    is_ios = platform.lower() == "ios"
     try:
         from artemis.mcp import adb_server
 
+        # Keep the Android call shape identical; the platform kwarg only
+        # exists for iOS.
         controller = await _run_in_daemon_thread(
-            lambda: adb_server._get_controller(device_serial=device_serial),
+            lambda: adb_server._get_controller(
+                device_serial=device_serial,
+                **({"target_platform": platform} if is_ios else {}),
+            ),
             timeout_seconds,
             "controller-init",
         )
@@ -329,8 +373,15 @@ async def smoke_test_device(
 
     remaining = max(0.5, timeout_seconds - (time.monotonic() - started))
     try:
+
+        async def _observe() -> Any:
+            if is_ios:
+                # The native Xcode session opens lazily on first use.
+                await controller._driver.connect()
+            return await controller.get_screen_data()
+
         device_data = await _run_in_daemon_thread(
-            lambda: _run_coroutine_blocking(controller.get_screen_data),
+            lambda: _run_coroutine_blocking(_observe),
             remaining,
             "screen-data",
         )
@@ -344,9 +395,14 @@ async def smoke_test_device(
 
     result["screenshot_bytes"] = _decoded_length(getattr(device_data, "base64", None))
     result["element_count"] = _count_elements(getattr(device_data, "elements", None))
-    from artemis.clients.screen_client_factory import describe_backend
+    if is_ios:
+        result["hierarchy_backend"] = "xcode"
+    else:
+        from artemis.clients.screen_client_factory import describe_backend
 
-    result["hierarchy_backend"] = describe_backend(getattr(controller_ctx, "ui_adb_client", None))
+        result["hierarchy_backend"] = describe_backend(
+            getattr(controller_ctx, "ui_adb_client", None)
+        )
 
     if result["screenshot_bytes"] is None:
         return _finish("Screen capture returned no screenshot data")

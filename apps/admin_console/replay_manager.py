@@ -397,16 +397,33 @@ class ReplayManager:
         return output_dir
 
     def list_devices(self) -> list[dict]:
-        """Dynamically queries the ADB server for connected Android devices."""
+        """Connected Android devices plus available iOS simulators."""
+        devices: list[dict] = []
         try:
             from adbutils import AdbClient
 
             adb = AdbClient(host="localhost", port=5037)
-            devices = adb.device_list()
-            return [{"serial": d.serial, "status": "online"} for d in devices]
+            devices.extend(
+                {"serial": d.serial, "status": "online", "platform": "android"}
+                for d in adb.device_list()
+            )
         except Exception as e:
             print(f"Warning: Failed to query device list from ADB: {e}")
-            return []
+        try:
+            from artemis.drivers.ios.discovery import list_ios_simulators_sync
+
+            for sim in list_ios_simulators_sync() or []:
+                devices.append(
+                    {
+                        "serial": sim["udid"],
+                        "status": "online" if sim.get("state") == "Booted" else "shutdown",
+                        "platform": "ios",
+                        "model": sim.get("name"),
+                    }
+                )
+        except Exception as e:
+            print(f"Warning: Failed to query iOS simulators: {e}")
+        return devices
 
     def load_session_goal(
         self, session_id: str, step_dir: Path, original_db_path: str = None
@@ -1604,12 +1621,44 @@ class ReplayManager:
         except Exception as e:
             print(f"Warning: Failed to update sandbox SQLite database: {e}")
 
+    @staticmethod
+    def _replay_device_context(device_info: dict, override_device_id: str | None):
+        """Build the simulated ``DeviceContext`` for a replayed session.
+
+        The recorded session decides the platform: an iOS session replays
+        through the Xcode driver against a simulator, never through ADB. The
+        frontend's device pick only retargets iOS replays (the picker was
+        always decorative for Android and stays that way); the driver still
+        validates the UDID against simctl at connect time.
+        """
+        from artemis.context import DeviceContext, DevicePlatform
+
+        sim_platform = str(
+            device_info.get("mobile_platform") or DevicePlatform.ANDROID.value
+        ).lower()
+        mobile_platform = (
+            DevicePlatform.IOS
+            if sim_platform == DevicePlatform.IOS.value
+            else DevicePlatform.ANDROID
+        )
+        sim_device_id = device_info.get("device_id", "replay-device")
+        if mobile_platform == DevicePlatform.IOS and override_device_id:
+            sim_device_id = override_device_id
+        return DeviceContext(
+            host_platform=("DARWIN" if mobile_platform == DevicePlatform.IOS else "LINUX"),
+            mobile_platform=mobile_platform,
+            device_id=sim_device_id,
+            device_width=device_info.get("device_width", 1080),
+            device_height=device_info.get("device_height", 2400),
+        )
+
     def create_ctx(
         self,
         session_id: str,
         step_number: int,
         agent_name: str = "explorer",
         replay_id: str = None,
+        override_device_id: str = None,
     ) -> ArtemisContext:
         """Creates a sandboxed ArtemisContext and DataEngine for the given session and step."""
         self._ensure_session_chunked(session_id)
@@ -1701,18 +1750,12 @@ class ReplayManager:
                 # Malformed device_info: simulate with the defaults below.
                 pass
 
-        sim_device_id = device_info.get("device_id", "replay-device")
-        sim_w = device_info.get("device_width", 1080)
-        sim_h = device_info.get("device_height", 2400)
-
-        device_context = DeviceContext(
-            host_platform="LINUX",
-            mobile_platform=DevicePlatform.ANDROID,
-            device_id=sim_device_id,
-            device_width=sim_w,
-            device_height=sim_h,
+        device_context = self._replay_device_context(device_info, override_device_id)
+        sim_device_id = device_context.device_id
+        print(
+            f"Replay simulated device: {sim_device_id} "
+            f"({device_context.device_width}x{device_context.device_height})"
         )
-        print(f"Replay simulated device: {sim_device_id} ({sim_w}x{sim_h})")
 
         from artemis.config import get_default_llm_config
 
@@ -1872,6 +1915,7 @@ class ReplayManager:
             step_number=step_number,
             agent_name=agent_name,
             replay_id=replay_id,
+            override_device_id=override_device_id,
         )
 
         state = self.instantiate_state(

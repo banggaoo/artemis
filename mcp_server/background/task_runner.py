@@ -121,6 +121,8 @@ async def run_task(
     device_serial: str | None = None,
     verification_level: str | None = None,
     explorer_pro_mode: str | None = None,
+    platform: str = "android",
+    ios_workspace: str | None = None,
 ):
     """Executes the mobile automation agent task and logs all actions/results.
 
@@ -154,7 +156,8 @@ async def run_task(
     print("--------------------------------------------------")
 
     agent = None
-    adb_path = device_utils.resolve_adb_path()
+    is_ios = platform.lower() == "ios"
+    adb_path = None if is_ios else device_utils.resolve_adb_path()
     target_serial = device_serial
 
     try:
@@ -168,9 +171,14 @@ async def run_task(
         from artemis.sdk.builders import Builders
         from artemis.sdk.types import AgentProfile
 
-        connected_devices = device_utils.get_connected_devices(adb_path)
+        connected_devices = [] if is_ios else device_utils.get_connected_devices(adb_path)
 
-        if device_serial:
+        if is_ios:
+            # The iOS driver resolves "booted" against `simctl` at connect
+            # time; an explicit UDID was already validated at admission.
+            target_serial = device_serial or "booted"
+            print(f"✅ Targeting iOS simulator: '{target_serial}'.")
+        elif device_serial:
             target_serial = device_serial
             if connected_devices and device_serial not in connected_devices:
                 print(
@@ -221,7 +229,12 @@ async def run_task(
         if settings.ADB_HOST:
             config_builder.with_adb_server(host=settings.ADB_HOST, port=settings.ADB_PORT)
 
-        if target_serial:
+        if is_ios:
+            config_builder.for_ios_simulator(
+                device_id=target_serial or "booted",
+                workspace_path=ios_workspace,
+            )
+        elif target_serial:
             from artemis.context import DevicePlatform
 
             config_builder.for_device(DevicePlatform.ANDROID, target_serial)
@@ -434,6 +447,16 @@ if __name__ == "__main__":
         "--explorer-pro-mode",
         help="Pro-profile Explorer perception version: 'flash', 'pro' or 'ultra'",
     )
+    parser.add_argument(
+        "--platform",
+        default="android",
+        choices=["android", "ios"],
+        help="Target platform ('android' default; 'ios' targets a Simulator via Xcode)",
+    )
+    parser.add_argument(
+        "--ios-workspace",
+        help="Xcode project/workspace path for first-run iOS approval (iOS only)",
+    )
 
     args = parser.parse_args()
 
@@ -449,5 +472,7 @@ if __name__ == "__main__":
             device_serial=args.device_serial,
             verification_level=args.verification_level,
             explorer_pro_mode=args.explorer_pro_mode,
+            platform=args.platform,
+            ios_workspace=args.ios_workspace,
         )
     )
