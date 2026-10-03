@@ -361,7 +361,16 @@ def test_cli_ios_runs_locally_without_android_status_or_daemon(monkeypatch):
     monkeypatch.delenv("ARTEMIS_TASK_WORKER", raising=False)
     monkeypatch.delenv("ARTEMIS_DEVICE_QUEUE_TICKET", raising=False)
     result = CliRunner().invoke(
-        app, ["run", "--platform", "ios", "--device-serial", "booted", "Open Settings"]
+        app,
+        [
+            "run",
+            "--platform",
+            "ios",
+            "--standalone",
+            "--device-serial",
+            "booted",
+            "Open Settings",
+        ],
     )
     assert result.exit_code == 0, result.output
     assert execute.call_args.kwargs["platform"] == DevicePlatform.IOS
@@ -375,7 +384,15 @@ def test_cli_forwards_ios_workspace(monkeypatch, tmp_path):
     monkeypatch.setattr(run_module, "execute_task", execute)
     result = CliRunner().invoke(
         app,
-        ["run", "--platform", "ios", "--ios-workspace", str(project), "Open Settings"],
+        [
+            "run",
+            "--platform",
+            "ios",
+            "--standalone",
+            "--ios-workspace",
+            str(project),
+            "Open Settings",
+        ],
     )
     assert result.exit_code == 0, result.output
     assert execute.call_args.kwargs["ios_workspace_path"] == project
@@ -405,7 +422,9 @@ def test_cli_approval_error_exits_2_with_guidance_panel(monkeypatch):
             )
         ),
     )
-    result = CliRunner().invoke(app, ["run", "--platform", "ios", "Open Settings"])
+    result = CliRunner().invoke(
+        app, ["run", "--platform", "ios", "--standalone", "Open Settings"]
+    )
     assert result.exit_code == 2, result.output
     assert "Xcode Approval Required" in result.output
     assert "Always Allow" in result.output
@@ -414,14 +433,25 @@ def test_cli_approval_error_exits_2_with_guidance_panel(monkeypatch):
     assert "GEMINI" not in result.output
 
 
-@pytest.mark.parametrize("env_name", ["ARTEMIS_CLOUD_MODE", "ARTEMIS_TASK_WORKER"])
-def test_cli_rejects_ios_android_services_before_run(monkeypatch, env_name):
+def test_cli_rejects_ios_cloud_mode_before_run(monkeypatch):
     execute = AsyncMock()
     monkeypatch.setattr(run_module, "execute_task", execute)
-    monkeypatch.setenv(env_name, "1")
+    monkeypatch.setenv("ARTEMIS_CLOUD_MODE", "1")
     result = CliRunner().invoke(app, ["run", "--platform", "ios", "Open Settings"])
     assert result.exit_code != 0
     execute.assert_not_called()
+
+
+def test_cli_allows_ios_queue_worker(monkeypatch):
+    """iOS daemon workers are supported; only cloud mode is rejected."""
+    execute = AsyncMock()
+    monkeypatch.setattr(run_module, "execute_task", execute)
+    monkeypatch.setenv("ARTEMIS_TASK_WORKER", "1")
+    monkeypatch.setenv("ARTEMIS_DEVICE_QUEUE_TICKET", "ticket-1")
+    result = CliRunner().invoke(app, ["run", "--platform", "ios", "Open Settings"])
+    assert result.exit_code == 0, result.output
+    execute.assert_awaited_once()
+    assert execute.call_args.kwargs["platform"] == DevicePlatform.IOS
 
 
 def test_ios_probe_and_pro_tool_gates(native_driver, monkeypatch):
@@ -738,7 +768,9 @@ async def test_context_disconnect_driver_swallows_expected_cleanup_errors(native
 def test_cli_ios_accepts_video_flag_in_standalone(monkeypatch, flag):
     execute = AsyncMock()
     monkeypatch.setattr(run_module, "execute_task", execute)
-    result = CliRunner().invoke(app, ["run", "--platform", "ios", flag, "Open Settings"])
+    result = CliRunner().invoke(
+        app, ["run", "--platform", "ios", "--standalone", flag, "Open Settings"]
+    )
     assert result.exit_code == 0, result.output
     execute.assert_awaited_once()
 
