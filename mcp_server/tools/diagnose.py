@@ -467,14 +467,37 @@ def _probe_unavailable(serial: str | None, error: str) -> dict[str, Any]:
     }
 
 
-async def _device_smoke_test(device_serial: str | None) -> dict[str, Any]:
+async def _device_smoke_test(
+    device_serial: str | None, platform: str = "android"
+) -> dict[str, Any]:
     """Drive the device end to end (screenshot + UI hierarchy) through the shared smoke test."""
-    return await smoke_test_device(device_serial)
+    return await smoke_test_device(device_serial, platform=platform)
 
 
 async def _run_device_probe(
-    adb_result: ProbeResult | None, requested_device: str | None
+    adb_result: ProbeResult | None,
+    requested_device: str | None,
+    ios_result: ProbeResult | None = None,
+    platform: str = "android",
 ) -> dict[str, Any]:
+    if platform == "ios":
+        simulators = (ios_result.metadata.get("simulators") if ios_result else None) or []
+        ready_udids = [str(d.get("udid")) for d in simulators if d.get("udid")]
+        if requested_device and requested_device not in ready_udids:
+            return _probe_unavailable(
+                requested_device,
+                f"requested iOS simulator '{requested_device}' is not available; nothing to probe",
+            )
+        if not ready_udids:
+            return _probe_unavailable(None, "no available iOS simulator found; nothing to probe")
+        serial = requested_device or (ready_udids[0] if len(ready_udids) == 1 else None)
+        try:
+            return await _device_smoke_test(serial, platform="ios")
+        except Exception as exc:
+            return _probe_unavailable(
+                serial, f"iOS smoke test raised {exc.__class__.__name__}: {exc}"
+            )
+
     devices = (adb_result.metadata.get("devices") if adb_result else None) or []
     ready = [str(d.get("serial")) for d in devices if d.get("state") == "device"]
     if requested_device and requested_device not in ready:
@@ -732,6 +755,7 @@ def _next_steps(
     tasks: dict[str, list[dict[str, Any]]],
     device_probe: dict[str, Any] | None,
     accessibility_helper: dict[str, Any] | None = None,
+    platform: str = "android",
 ) -> list[str]:
     steps: list[str] = []
     needs_restart = False
@@ -773,16 +797,20 @@ def _next_steps(
             steps.extend(credential_lines)
             needs_restart = needs_restart or credential_restart
 
-    steps.extend(
-        _device_steps(
-            adb_result,
-            attempt_fix=attempt_fix,
-            requested_device=requested_device,
-            emulator=emulator,
-            launch_requested=bool(launch_steps),
-            tasks=tasks,
+    if platform != "ios":
+        # ADB-specific guidance (busy devices, AVD hints, authorization) does
+        # not apply to simulator targets; the ios_simulators probe's own
+        # steps cover iOS findings.
+        steps.extend(
+            _device_steps(
+                adb_result,
+                attempt_fix=attempt_fix,
+                requested_device=requested_device,
+                emulator=emulator,
+                launch_requested=bool(launch_steps),
+                tasks=tasks,
+            )
         )
-    )
     steps.extend(launch_steps)
     steps.extend(_device_probe_steps(device_probe))
     steps.extend(_helper_steps(accessibility_helper, attempt_fix=attempt_fix))
@@ -975,19 +1003,24 @@ async def _run_extras(
     launch_avd: str | None,
     verify_credentials: bool,
     probe_device: bool,
+    platform: str = "android",
 ) -> dict[str, Any]:
     """Optional, slower work: emulator launch, live key checks, device smoke test, lock state."""
     adb_result = _find(results, "android_adb")
+    ios_result = _find(results, "ios_simulators")
     launch_steps: list[str] = []
     if launch_avd:
         emulator, launch_steps = await _handle_launch_avd(launch_avd, adb_result)
     else:
         emulator = _emulator_status()
 
-    helper_serial = _helper_target(adb_result, requested_device)
+    # The on-device Accessibility Helper is Android-only; iOS observes natively.
+    helper_serial = _helper_target(adb_result, requested_device) if platform != "ios" else None
     credentials, device_probe, accessibility_helper = await asyncio.gather(
         _verify_credentials(_find(results, "gemini_api_key")) if verify_credentials else _none(),
-        _run_device_probe(adb_result, requested_device) if probe_device else _none(),
+        _run_device_probe(adb_result, requested_device, ios_result, platform)
+        if probe_device
+        else _none(),
         asyncio.to_thread(_helper_status, helper_serial) if helper_serial else _none(),
     )
     return {
@@ -1000,10 +1033,23 @@ async def _run_extras(
     }
 
 
-def _requested_device_ready(results: list[ProbeResult], requested_device: str | None) -> bool:
-    """A caller-named device counts as a blocker: attached and authorized, or not ready."""
+def _requested_device_ready(
+    results: list[ProbeResult],
+    requested_device: str | None,
+    platform: str = "android",
+) -> bool:
+    """A caller-named device counts as a blocker: attached and usable, or not ready."""
     if not requested_device:
         return True
+    if platform == "ios":
+        ios_result = _find(results, "ios_simulators")
+        if ios_result is None:
+            return False
+        simulators = ios_result.metadata.get("simulators") or []
+        return any(
+            d.get("udid") == requested_device and d.get("state") in ("Booted", "Shutdown")
+            for d in simulators
+        )
     adb_result = _find(results, "android_adb")
     if adb_result is None:
         return False
@@ -1018,9 +1064,19 @@ def _verdict(
     credentials: list[dict[str, Any]] | None,
     device_probe: dict[str, Any] | None,
     accessibility_helper: dict[str, Any] | None = None,
+    platform: str = "android",
 ) -> str:
-    verdict = base_verdict(results)
-    if verdict == "blocked" or not _requested_device_ready(results, requested_device):
+    if platform == "ios":
+        # iOS tasks never touch ADB: the iOS simulator probe takes the device
+        # gate and android_adb drops out of the blocker set for this call.
+        ios_result = _find(results, "ios_simulators")
+        adjusted = [r for r in results if r.id != "android_adb"]
+        verdict = base_verdict(adjusted)
+        if verdict == "blocked" or ios_result is None or ios_result.status is not ProbeStatus.PASS:
+            return "blocked"
+    else:
+        verdict = base_verdict(results)
+    if verdict == "blocked" or not _requested_device_ready(results, requested_device, platform):
         return "blocked"
     primary = _primary_credential(credentials)
     if primary is not None and not primary.get("valid"):
@@ -1096,6 +1152,7 @@ async def mobile_diagnose(
     launch_avd: str | None = None,
     verify_credentials: bool = False,
     probe_device: bool = False,
+    platform: str | None = None,
 ) -> dict[str, Any]:
     """Diagnoses why ARTEMIS cannot run tasks from this IDE and returns the fixes.
 
@@ -1177,10 +1234,16 @@ async def mobile_diagnose(
           really start. Use it when the checks pass but tasks still fail on
           the device, or the screen stays black. A failed probe makes the
           verdict "blocked" and lists the fix.
+        platform: 'android' (default) or 'ios'. With 'ios', `device_serial`
+          is a simulator UDID and `probe_device` exercises the native Xcode
+          path; ADB-only extras (AVD launch, accessibility helper) are skipped.
     """
     fixes_applied: list[dict[str, Any]] = []
+    platform_name = (platform or "android").strip().lower()
     requested_device = device_serial.strip() if device_serial and device_serial.strip() else None
-    avd_name = launch_avd.strip() if launch_avd and launch_avd.strip() else None
+    avd_name = (
+        launch_avd.strip() if launch_avd and launch_avd.strip() and platform_name != "ios" else None
+    )
     try:
         report, host = await asyncio.wait_for(
             collect_readiness(), timeout=DIAGNOSIS_TIMEOUT_SECONDS
@@ -1201,6 +1264,7 @@ async def mobile_diagnose(
                 launch_avd=avd_name,
                 verify_credentials=verify_credentials,
                 probe_device=probe_device,
+                platform=platform_name,
             ),
             timeout=DIAGNOSIS_TIMEOUT_SECONDS,
         )
@@ -1216,6 +1280,7 @@ async def mobile_diagnose(
         credentials=credentials,
         device_probe=device_probe,
         accessibility_helper=accessibility_helper,
+        platform=platform_name,
     )
     device = _compact_device(report)
     if device is not None and accessibility_helper is not None:
@@ -1236,6 +1301,7 @@ async def mobile_diagnose(
             tasks=extras["tasks"],
             device_probe=device_probe,
             accessibility_helper=accessibility_helper,
+            platform=platform_name,
         ),
         "checks": [_render_check(r) for r in sort_by_fix_order(results)],
         "host": _compact_host(host.metadata),

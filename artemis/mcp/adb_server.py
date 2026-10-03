@@ -115,12 +115,41 @@ _GLOBAL_CONTROLLER = None
 _CONTROLLERS: dict[str, Any] = {}
 
 
-def _get_controller(device_serial: str | None = None):
-    """Lazy-load device controller on-demand, caching per device serial."""
+def _get_controller(device_serial: str | None = None, target_platform: str | None = None):
+    """Lazy-load device controller on-demand, caching per device serial.
+
+    ``target_platform="ios"`` builds a native iOS Simulator controller: the
+    serial is a simulator UDID (or "booted"), the context carries
+    ``DevicePlatform.IOS`` so the factory selects the Xcode driver, and the
+    cache key is namespaced so a UDID can never collide with an Android
+    serial. Callers must ``await driver.connect()`` before interacting --
+    the native session opens lazily on first use.
+    """
     global _GLOBAL_CONTROLLER, _CONTROLLERS
     target_serial = (
         device_serial or os.environ.get("ARTEMIS_DEVICE_ID") or os.environ.get("ADB_DEVICE_SERIAL")
     )
+    if (target_platform or "").lower() == "ios":
+        cache_key = f"ios:{target_serial or 'booted'}"
+        if cache_key in _CONTROLLERS:
+            return _CONTROLLERS[cache_key]
+        logger.info("Initializing lazy iOS simulator controller...")
+        ctx = ArtemisContext(
+            trace_id="mcp-session",
+            device=DeviceContext(
+                host_platform=platform.os_type.name,
+                mobile_platform=DevicePlatform.IOS,
+                device_id=target_serial or "booted",
+                device_width=1206,
+                device_height=2622,
+            ),
+        )
+        controller = UnifiedMobileController(ctx=ctx)
+        _CONTROLLERS[cache_key] = controller
+        if _GLOBAL_CONTROLLER is None:
+            _GLOBAL_CONTROLLER = controller
+        return controller
+
     if target_serial and target_serial in _CONTROLLERS:
         return _CONTROLLERS[target_serial]
     if not target_serial and _GLOBAL_CONTROLLER is not None:
