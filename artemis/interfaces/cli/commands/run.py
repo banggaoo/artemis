@@ -390,6 +390,10 @@ def run_command(
                     app_path=app_path,
                     session_id=target_sid,
                     ingress="cli",
+                    platform=platform.value,
+                    ios_workspace=str(ios_workspace) if ios_workspace else None,
+                    verification_level=verification_level,
+                    explorer_mode=explorer_pro_mode,
                     base_url=base_url,
                 )
                 if resp and resp.get("tasks"):

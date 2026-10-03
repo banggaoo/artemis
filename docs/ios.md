@@ -2,9 +2,10 @@
 
 Artemis can run Flash and Pro tasks on iOS simulators on macOS with Xcode 27 or
 newer. Select iOS explicitly: the existing Android defaults still apply on a
-Mac. The first implementation supports the standalone CLI and embedded Python
-SDK. The web console, Artemis daemon, remote `artemis-client`, and Artemis MCP
-server currently use the Android device path.
+Mac. iOS tasks work through the CLI, embedded Python SDK, Artemis Daemon task
+queue, Admin Console, and the Artemis MCP tools — including native screen
+recording, video analysis/replay, device discovery, live screen streaming, and
+per-device locking that cannot collide with Android targets.
 
 The iOS driver uses tools included with Xcode and Artemis's existing Python MCP
 dependency. It communicates with `xcrun mcpbridge` using an initialized MCP
@@ -113,10 +114,7 @@ from artemis.sdk import Agent
 from artemis.sdk.builders import AgentConfigBuilder
 
 config = (
-    AgentConfigBuilder()
-    .for_ios_simulator("<SIMULATOR-UDID>")
-    .with_default_profile("flash")
-    .build()
+    AgentConfigBuilder().for_ios_simulator("<SIMULATOR-UDID>").with_default_profile("flash").build()
 )
 agent = Agent(config=config)
 ```
@@ -143,6 +141,33 @@ The generic builder also accepts
 `for_device(DevicePlatform.IOS, "<SIMULATOR-UDID>")`, with `DevicePlatform`
 imported from `artemis.context`. Supplying only a `device_serial` without an iOS
 configuration retains the existing Android selection behavior.
+
+## Daemon, web console, and batch submission
+
+Without `--standalone`, `artemis run --platform ios` forwards
+`platform`/`ios_workspace`/`device_serial` to the running Artemis Daemon, which
+queues the task against the simulator under the shared `ios` lock scope and
+spawns the worker with `--platform ios` — no ADB endpoint or Android readiness
+probe is involved. `artemis batch` accepts the same `--platform`,
+`--device-serial`, and `--ios-workspace` flags for goal lists.
+
+The Admin Console `/api/run` accepts `platform: "ios"`, a simulator UDID in
+`device_serial`, and an optional `ios_workspace`; `/api/devices` lists Android
+devices and iOS simulators together, each tagged with its `platform`. The live
+screen view (`/api/stream/device-live`) streams simulator frames captured with
+`simctl io screenshot` when an iOS task holds the lock or a simulator is the
+only viable target; `/api/stream/device-state` reports the `platform` of the
+streamed device. Replay preserves the recorded session's `mobile_platform`, so
+an iOS trace replays through the Xcode driver on a simulator (the device
+picker retargets iOS replays to a chosen UDID).
+
+`mobile_run_task` accepts `platform="ios"`, `device_serial=<UDID>`, and
+`ios_workspace=<path>`; it validates the UDID against `simctl` rather than ADB
+and queues the runner under the `ios` lock scope. `mobile_get_device_state`
+and `mobile_diagnose` accept the same `platform` switch — the latter runs a
+native screenshot/hierarchy smoke test on the simulator. The legacy
+`Android_ADB_Controller` actuator server (tap/swipe/type tools) remains
+Android-only.
 
 A minimal run looks like:
 
@@ -224,8 +249,9 @@ recorded frames.
   inventory is empty.
 - **Multiple booted simulators:** supply `--device-serial` with the intended
   simulator's UDID.
-- **Android daemon or device checks appear:** include `--platform ios
-  --standalone`; iOS tasks currently run in the embedded process.
+- **A queued iOS task runs on the wrong surface:** confirm the submission
+  carried `platform: "ios"` (CLI `--platform ios`, web request `platform`,
+  or the MCP `platform` argument); tasks default to Android.
 
 ## Contributing and validation
 
