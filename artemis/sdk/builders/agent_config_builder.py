@@ -15,6 +15,7 @@
 """Builder for AgentConfig objects using a fluent interface."""
 
 import os
+from pathlib import Path
 from typing import Any, cast
 
 from artemis.config import (
@@ -42,6 +43,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         self._disable_checker: bool = False
         self._concurrency_mode: str = "per_device"
         self._max_concurrency: int | None = None
+        self._ios_workspace_path: Path | None = None
 
         agent_cfg = load_agent_config()
         self._explorer = agent_cfg.explorer
@@ -76,9 +78,20 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         """Target a specific Android device by its ADB serial number."""
         return self.for_device(DevicePlatform.ANDROID, device_serial)
 
-    def for_ios_simulator(self, device_id: str = "booted") -> "AgentConfigBuilder":
+    def for_ios_simulator(
+        self, device_id: str = "booted", *, workspace_path: str | Path | None = None
+    ) -> "AgentConfigBuilder":
         """Target an iOS simulator UDID, or the single booted simulator."""
+        if workspace_path is not None:
+            self.with_ios_workspace(workspace_path)
         return self.for_device(DevicePlatform.IOS, device_id)
+
+    def with_ios_workspace(self, workspace_path: str | Path | None) -> "AgentConfigBuilder":
+        """Set an existing Xcode project/workspace for iOS first-run approval."""
+        self._ios_workspace_path = (
+            Path(workspace_path).expanduser().resolve() if workspace_path is not None else None
+        )
+        return self
 
     def with_concurrency_mode(self, mode: str) -> "AgentConfigBuilder":
         """Configure concurrency mode: 'global' (1 task globally) or 'per_device' (1 task per device)."""
@@ -458,6 +471,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
             ),
             "concurrency_mode": self._concurrency_mode,
             "max_concurrency": self._max_concurrency,
+            "ios_workspace_path": self._ios_workspace_path,
         }
 
     def build(self, validate_profiles: bool = True) -> AgentConfig:

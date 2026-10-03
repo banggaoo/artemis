@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
 from typing import Literal
 
 from artemis.config import (
@@ -71,6 +72,10 @@ class AgentConfig(AgentConfigBase):
     video_analyzer: VideoAnalyzerConfig = Field(default_factory=VideoAnalyzerConfig)
     concurrency_mode: Literal["global", "per_device"] = "per_device"
     max_concurrency: int | None = None
+    ios_workspace_path: Path | None = Field(
+        default=None,
+        description="Optional existing Xcode project/workspace for local iOS first-run approval; no permission grants.",
+    )
 
     model_config = {"arbitrary_types_allowed": True}
 

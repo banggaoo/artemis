@@ -19,12 +19,66 @@ A timeout retires the bridge; a possibly executed input is never retried.
 import asyncio
 import json
 import os
+from pathlib import Path
+import sys
 from typing import Any
 
 import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.shared.exceptions import McpError
+
+
+_APPROVAL_MESSAGES = (
+    "agent isn't approved",
+    "agent is not approved",
+    "waiting for the user to approve",
+)
+
+
+class XcodeApprovalRequiredError(RuntimeError):
+    """Xcode refused a tool because this interpreter lacks agent/folder approval."""
+
+    def __init__(
+        self,
+        tool_name: str,
+        native_message: str,
+        *,
+        workspace_path: str | Path | None = None,
+    ):
+        super().__init__(f"Xcode tool {tool_name} failed: {native_message}")
+        self.tool_name = tool_name
+        self.native_message = native_message
+        self.workspace_path = (
+            Path(workspace_path).expanduser().resolve() if workspace_path is not None else None
+        )
+
+    @property
+    def guidance(self) -> str:
+        """Human steps to approve this interpreter; never executes them."""
+        return xcode_approval_guidance(self.workspace_path)
+
+
+def xcode_approval_guidance(workspace_path: str | Path | None = None) -> str:
+    """Human-facing Xcode approval steps; printing is the only action taken."""
+    workspace = str(workspace_path) if workspace_path else "not supplied"
+    return (
+        "Xcode approval is required for the Python interpreter running Artemis.\n"
+        f"Interpreter: {Path(sys.executable).resolve()}\n"
+        f"Workspace: {workspace}\n\n"
+        "Open the Xcode MCP menu bar icon and approve this interpreter and the selected "
+        "project folder. Choose Always Allow or persistent approval there if offered. "
+        "Alternatively, inspect the relevant pending request IDs and approve only those "
+        "entries from your own terminal:\n"
+        "  xcrun mcp-server status\n"
+        "  sudo xcrun mcp-server approve <REQUEST-ID> --always\n\n"
+        "Artemis never runs sudo or changes global access settings. After approval, "
+        "rerun the task. Interpreter upgrades, a different project folder, or expiring "
+        "grants can require approval again.\n"
+        "If Xcode has not recorded a request yet, rerun with "
+        "--platform ios --ios-workspace /absolute/path/YourApp.xcodeproj "
+        "(or pass workspace_path to for_ios_simulator())."
+    )
 
 
 _ERRORS = (
@@ -127,6 +181,8 @@ class XcodeBridge:
             raise
         if result.isError:
             message = " ".join(block.text for block in result.content if block.type == "text")
+            if any(marker in message.casefold() for marker in _APPROVAL_MESSAGES):
+                raise XcodeApprovalRequiredError(name, message)
             raise RuntimeError(f"Xcode tool {name} failed: {message}")
         if isinstance(result.structuredContent, dict):
             return result.structuredContent

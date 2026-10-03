@@ -151,7 +151,10 @@ class Agent(AgentBase):
         publish_startup_progress(
             "device_check", "Checking the iOS simulator", session_id=self._session_id
         )
-        driver = XcodeSimulatorDriver(device_id=self._config.device_id or "booted")
+        driver = XcodeSimulatorDriver(
+            device_id=self._config.device_id or "booted",
+            workspace_path=getattr(self._config, "ios_workspace_path", None),
+        )
         self._ios_driver = driver
         try:
             # Resolve the simulator without booting it or opening a native UI

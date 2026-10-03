@@ -16,11 +16,13 @@
 
 import asyncio
 import os
+from pathlib import Path
 from typing import Annotated
 
 from langchain_core.callbacks.base import Callbacks
 from artemis.config import checker_overrides_for_level, settings
 from artemis.context import DevicePlatform
+from artemis.drivers.ios.bridge import XcodeApprovalRequiredError, xcode_approval_guidance
 from artemis.utils.startup_progress import publish_startup_progress
 from third_party.mobile_use.main import (
     GoalArgument,
@@ -37,6 +39,7 @@ from third_party.mobile_use.utils.logger import get_logger
 import signal
 from rich.console import Console
 from rich.panel import Panel
+from rich.text import Text
 import typer
 
 logger = get_logger(__name__)
@@ -65,6 +68,7 @@ async def execute_task(
     explorer_pro_mode: str | None = None,
     verification_level: str | None = None,
     platform: DevicePlatform = DevicePlatform.ANDROID,
+    ios_workspace_path: Path | None = None,
 ) -> None:
     """Executes a single mobile automation task end-to-end.
 
@@ -87,6 +91,8 @@ async def execute_task(
             'strict'); applied before the explicit ``enable_checker`` switch.
     """
     platform = DevicePlatform(platform)
+    if ios_workspace_path is not None and platform != DevicePlatform.IOS:
+        raise ValueError("--ios-workspace requires --platform ios.")
     if platform == DevicePlatform.IOS and os.environ.get("ARTEMIS_CLOUD_MODE") == "1":
         raise ValueError("iOS Simulator support is local only; cloud mode targets Android.")
     effective_sid = (
@@ -158,6 +164,9 @@ async def execute_task(
     if target_serial:
         config.for_device(platform, target_serial)
 
+    if ios_workspace_path is not None:
+        config.with_ios_workspace(ios_workspace_path)
+
     if graph_config_callbacks:
         config.with_graph_config_callbacks(graph_config_callbacks)
 
@@ -193,6 +202,19 @@ def run_command(
             help="Target mobile platform: Android (default) or a local iOS simulator.",
         ),
     ] = DevicePlatform.ANDROID,
+    ios_workspace: Annotated[
+        Path | None,
+        typer.Option(
+            "--ios-workspace",
+            metavar="PATH",
+            rich_help_panel="Platform",
+            exists=True,
+            dir_okay=True,
+            file_okay=False,
+            resolve_path=True,
+            help="Existing Xcode project/workspace to request iOS first-run agent approval.",
+        ),
+    ] = None,
     locked_app_package: Annotated[
         str | None,
         typer.Option(
@@ -322,6 +344,9 @@ def run_command(
         or os.environ.get("ARTEMIS_DEVICE_QUEUE_TICKET") is not None
     )
     is_standalone = standalone or os.environ.get("ARTEMIS_STANDALONE") == "1"
+
+    if ios_workspace is not None and platform != DevicePlatform.IOS:
+        raise typer.BadParameter("--ios-workspace requires --platform ios.")
 
     if platform == DevicePlatform.IOS:
         if os.environ.get("ARTEMIS_CLOUD_MODE") == "1":
@@ -465,6 +490,7 @@ def run_command(
                 explorer_pro_mode=explorer_pro_mode,
                 verification_level=verification_level,
                 platform=platform,
+                ios_workspace_path=ios_workspace,
             )
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
@@ -472,6 +498,17 @@ def run_command(
         # this worker to stop through a cancel marker and the Agent cancelled
         # its own task so the recording and trace could be finalized.
         cancelled = True
+    except XcodeApprovalRequiredError as e:
+        console.print()
+        console.print(
+            Panel(
+                Text(f"{e}\n\n{xcode_approval_guidance(workspace_path=ios_workspace)}"),
+                title="Xcode Approval Required",
+                expand=False,
+            )
+        )
+        console.print()
+        raise SystemExit(2)
     except Exception as e:
         err_msg = str(e)
         if "API_KEY" in err_msg or "requires" in err_msg:

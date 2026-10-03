@@ -14,13 +14,20 @@
 import asyncio
 from contextlib import asynccontextmanager
 import json
+from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 from mcp.types import CallToolResult, TextContent
 import pytest
 
 from artemis.drivers.ios import bridge
-from artemis.drivers.ios.bridge import XcodeBridge
+from artemis.drivers.ios.bridge import (
+    XcodeApprovalRequiredError,
+    XcodeBridge,
+    xcode_approval_guidance,
+)
 
 
 def response(data=None, *, text=None, error=False):
@@ -162,7 +169,8 @@ async def test_native_tool_errors_propagate_without_retrying_or_destroying_conne
     client = XcodeBridge()
     await client.start()
     with pytest.raises(
-        RuntimeError, match="DeviceInteractionStartSession failed: Agent is not approved"
+        XcodeApprovalRequiredError,
+        match="DeviceInteractionStartSession failed: Agent is not approved",
     ):
         await client.call("DeviceInteractionStartSession", {})
     assert await client.call("DeviceInteractionEndSession", {}) == {"userMessage": "Closed"}
@@ -171,6 +179,73 @@ async def test_native_tool_errors_propagate_without_retrying_or_destroying_conne
         "DeviceInteractionEndSession",
     ]
     await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "native_message",
+    [
+        "This agent isn't approved to use Xcode's tools yet. Call XcodeOpenWorkspace first.",
+        "Agent is not approved",
+        "Xcode is waiting for the user to approve this request; it has been recorded.",
+    ],
+)
+async def test_native_approval_refusals_become_typed_errors(native_transport, native_message):
+    async def call(name, arguments):
+        return response(text=native_message, error=True)
+
+    native_transport.session.call_hook = call
+    client = XcodeBridge()
+    await client.start()
+    with pytest.raises(XcodeApprovalRequiredError) as caught:
+        await client.call("DeviceInteractionStartSession", {})
+    error = caught.value
+    assert error.tool_name == "DeviceInteractionStartSession"
+    assert error.native_message == native_message
+    assert str(error) == f"Xcode tool DeviceInteractionStartSession failed: {native_message}"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_unrelated_tool_errors_stay_generic_and_keep_bridge_alive(native_transport):
+    results = iter(
+        [response(text="Simulator is busy", error=True), response({"userMessage": "OK"})]
+    )
+
+    async def call(name, arguments):
+        return next(results)
+
+    native_transport.session.call_hook = call
+    client = XcodeBridge()
+    await client.start()
+    with pytest.raises(RuntimeError, match="Simulator is busy") as caught:
+        await client.call("DeviceInteractionSynthesize", {})
+    assert not isinstance(caught.value, XcodeApprovalRequiredError)
+    assert await client.call("DeviceInteractionEndSession", {}) == {"userMessage": "OK"}
+    await client.close()
+
+
+def test_approval_guidance_names_interpreter_and_workspace_without_subprocess(
+    tmp_path, monkeypatch
+):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("guidance must never launch a subprocess")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(bridge.asyncio, "create_subprocess_exec", forbidden)
+    guidance = xcode_approval_guidance(workspace_path=tmp_path)
+    assert str(Path(sys.executable).resolve()) in guidance
+    assert str(tmp_path) in guidance
+    assert "Always Allow" in guidance
+    assert "--always" in guidance
+    assert "not supplied" not in guidance
+    bare = xcode_approval_guidance()
+    assert "Workspace: not supplied" in bare
+    assert isinstance(XcodeApprovalRequiredError("tool", "msg").guidance, str)
+    scoped = XcodeApprovalRequiredError("tool", "msg", workspace_path=tmp_path)
+    assert scoped.workspace_path == tmp_path
+    assert str(tmp_path) in scoped.guidance
 
 
 @pytest.mark.asyncio

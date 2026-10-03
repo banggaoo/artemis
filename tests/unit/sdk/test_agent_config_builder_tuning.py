@@ -121,3 +121,37 @@ def test_with_explorer_versions_is_an_advanced_per_agent_override(monkeypatch):
     )
     assert cfg.get_explorer_version(agent_name="validator") == "ultra"
     assert cfg.get_explorer_version(agent_name="operator") == "flash"
+
+
+def test_ios_workspace_path_defaults_to_none_and_survives_build():
+    cfg = AgentConfigBuilder().build()
+    assert cfg.ios_workspace_path is None
+
+
+def test_with_ios_workspace_accepts_str_and_path_and_clears(tmp_path):
+    project = tmp_path / "My App.xcodeproj"
+    project.mkdir()
+    builder = AgentConfigBuilder()
+    cfg = builder.with_ios_workspace(str(project)).build()
+    assert cfg.ios_workspace_path == project
+    cfg = builder.with_ios_workspace(None).build()
+    assert cfg.ios_workspace_path is None
+
+
+def test_for_ios_simulator_workspace_kwarg_and_omission(tmp_path):
+    project = tmp_path / "App.xcodeproj"
+    project.mkdir()
+    cfg = (
+        AgentConfigBuilder()
+        .for_ios_simulator(workspace_path=project)
+        .build(validate_profiles=False)
+    )
+    assert cfg.ios_workspace_path == project
+    # Omitting the kwarg does not clear a workspace set earlier on the builder.
+    cfg = (
+        AgentConfigBuilder()
+        .with_ios_workspace(project)
+        .for_ios_simulator()
+        .build(validate_profiles=False)
+    )
+    assert cfg.ios_workspace_path == project
