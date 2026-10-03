@@ -555,6 +555,95 @@ def test_inaccessible_canvas_can_use_native_logical_screenshot_space():
     assert scale == (1, 1)
 
 
+EMPTY_FIELD = (
+    "TextField, {{32.0, 199.0}, {338.0, 22.0}}, "
+    "placeholderValue: 'Habit to avoid', Keyboard Focused, hitPoint: {201.0, 210.0}"
+)
+FILLED_FIELD = (
+    "TextField, {{32.0, 199.0}, {338.0, 22.0}}, "
+    "placeholderValue: 'Habit to avoid', value: caf\u00e9 \U0001f642, "
+    "Keyboard Focused, hitPoint: {201.0, 210.0}"
+)
+TRUNCATED_FIELD = (
+    "TextField, {{32.0, 199.0}, {338.0, 22.0}}, "
+    "placeholderValue: 'Habit to avoid', value: Artemis iOS direct..., "
+    "Keyboard Focused, hitPoint: {201.0, 210.0}"
+)
+COMMA_FIELD = (
+    "TextField, {{32.0, 199.0}, {338.0, 22.0}}, "
+    "value: hello, world, Keyboard Focused, hitPoint: {201.0, 210.0}"
+)
+QUOTED_FIELD = (
+    "TextField, {{32.0, 199.0}, {338.0, 22.0}}, "
+    "value: 'quoted text', Keyboard Focused, hitPoint: {201.0, 210.0}"
+)
+LABELED_FIELD = (
+    "TextField, {{32.0, 199.0}, {338.0, 22.0}}, label: 'Title', "
+    "value: 'typed', placeholderValue: 'Habit to avoid', hitPoint: {201.0, 210.0}"
+)
+
+
+def test_empty_textfield_exposes_placeholder_as_text_and_metadata():
+    elements, _ = parse_hierarchy(EMPTY_FIELD, 402, 874)
+    assert len(elements) == 1
+    field = elements[0]
+    assert field["class"] == "TextField"
+    assert field["placeholder"] == "Habit to avoid"
+    assert field["text"] == "Habit to avoid"
+    assert "value" not in field
+    assert field["hit_point"] == [201, 210]
+
+
+def test_populated_unlabeled_textfield_exposes_value_as_text_and_metadata():
+    elements, _ = parse_hierarchy(FILLED_FIELD, 402, 874)
+    field = elements[0]
+    assert field["value"] == "caf\u00e9 \U0001f642"
+    assert field["text"] == "caf\u00e9 \U0001f642"
+    assert field["placeholder"] == "Habit to avoid"
+    assert field["hit_point"] == [201, 210]
+
+
+def test_elided_unquoted_value_is_preserved_verbatim():
+    elements, _ = parse_hierarchy(TRUNCATED_FIELD, 402, 874)
+    field = elements[0]
+    assert field["value"] == "Artemis iOS direct..."
+    assert field["text"] == "Artemis iOS direct..."
+
+
+def test_unquoted_value_keeps_ordinary_commas_before_metadata():
+    elements, _ = parse_hierarchy(COMMA_FIELD, 402, 874)
+    field = elements[0]
+    assert field["value"] == "hello, world"
+    assert field["text"] == "hello, world"
+
+
+def test_quoted_value_format_still_parsed():
+    elements, _ = parse_hierarchy(QUOTED_FIELD, 402, 874)
+    field = elements[0]
+    assert field["value"] == "quoted text"
+    assert field["text"] == "quoted text"
+
+
+def test_labeled_textfield_keeps_label_text_and_retains_field_metadata():
+    elements, _ = parse_hierarchy(LABELED_FIELD, 402, 874)
+    field = elements[0]
+    assert field["text"] == "Title"
+    assert field["value"] == "typed"
+    assert field["placeholder"] == "Habit to avoid"
+    assert field["hit_point"] == [201, 210]
+
+
+def test_unquoted_native_value_metadata_keeps_label_text():
+    line = (
+        "Other, {{369.0, 132.0}, {30.0, 414.0}}, "
+        "label: 'Vertical scroll bar, 1 page', value: 0%, hitPoint: {384.0, 339.0}"
+    )
+    elements, _ = parse_hierarchy(line, 402, 874)
+    field = elements[0]
+    assert field["text"] == "Vertical scroll bar, 1 page"
+    assert field["value"] == "0%"
+
+
 def test_foreground_package_is_unknown_when_multiple_apps_overlap():
     assert application_bundle(APPLE_HIERARCHY) == "com.example.app"
     assert (

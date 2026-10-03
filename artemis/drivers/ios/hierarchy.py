@@ -77,10 +77,32 @@ def parse_hierarchy(
         label = re.search(r"label:\s*'((?:\\.|[^'])*)'", line)
         quoted = re.search(r'"([^"\n]*)"', line[: match.start()])
         identifier = re.search(r"identifier:\s*'((?:\\.|[^'])*)'", line)
+        placeholder = re.search(r"placeholderValue:\s*'((?:\\.|[^'])*)'", line)
+        value = re.search(r"value:\s*'((?:\\.|[^'])*)'", line)
+        if value:
+            value_text = value.group(1)
+        else:
+            # Xcode elides long values and drops quotes, e.g. `value: Text...`,
+            # so read until the next native metadata delimiter verbatim.
+            unquoted = re.search(
+                r"\bvalue:\s*(.*?)(?=,\s*(?:Keyboard Focused\b|Selected\b|Disabled\b"
+                r"|hitPoint:|activationBundleId:|identifier:|label:|placeholderValue:)|$)",
+                line,
+            )
+            value_text = unquoted.group(1).strip() if unquoted else None
         hit = _HIT.search(line)
         activation = re.search(r"activationBundleId:\s*(\S+)", line)
+        text = ""
+        if label:
+            text = label.group(1)
+        elif quoted:
+            text = quoted.group(1)
+        elif value_text:
+            text = value_text
+        elif placeholder and placeholder.group(1):
+            text = placeholder.group(1)
         element: dict[str, Any] = {
-            "text": label.group(1) if label else quoted.group(1) if quoted else "",
+            "text": text,
             "resource_id": identifier.group(1) if identifier else "",
             "class": line.strip().split(",", 1)[0].split(" ", 1)[0],
             "bounds": f"[{left},{top}][{right},{bottom}]",
@@ -91,5 +113,9 @@ def parse_hierarchy(
             element["hit_point"] = [round(hx * scale[0]), round(hy * scale[1])]
         if activation:
             element["activation_bundle_id"] = activation.group(1)
+        if placeholder:
+            element["placeholder"] = placeholder.group(1)
+        if value_text is not None:
+            element["value"] = value_text
         elements.append(element)
     return elements, scale
