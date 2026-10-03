@@ -352,14 +352,8 @@ def run_command(
             raise typer.BadParameter(
                 "iOS Simulator support is local only; cloud mode targets Android."
             )
-        if is_worker:
-            raise typer.BadParameter(
-                "The daemon and device queue support Android only; run iOS tasks locally."
-            )
         if locked_app_package:
             raise typer.BadParameter("--locked-app is unavailable for iOS simulator tasks.")
-        is_standalone = True
-        console.print("[dim]Running the iOS simulator task in standalone mode.[/dim]")
     ensure_video_recording_available(with_video_recording_tools)
 
     # All platforms route through unified Artemis Daemon unless specifically configured as standalone
