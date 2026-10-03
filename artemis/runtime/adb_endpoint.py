@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Immutable ADB endpoint and task target primitives.
+"""Immutable device endpoint and task target primitives.
 
-The selected endpoint is a user preference. An :class:`AdbTarget` is an
-execution snapshot. Keeping those concepts separate prevents a queued or
-running task from silently moving to another ADB server when the preference
-changes in the Admin Console.
+The selected endpoint is a user preference. An :class:`AdbTarget` or
+:class:`IosTarget` is an execution snapshot. Keeping those concepts separate
+prevents a queued or running task from silently moving to another ADB server
+or simulator when the preference changes in the Admin Console.
 """
 
 from __future__ import annotations
@@ -121,6 +121,10 @@ class AdbTarget:
     serial: str | None = None
 
     @property
+    def platform(self) -> str:
+        return "android"
+
+    @property
     def lock_scope(self) -> str:
         return self.endpoint.identity
 
@@ -128,8 +132,58 @@ class AdbTarget:
     def lock_key(self) -> str:
         return f"{self.lock_scope}/{self.serial or 'pending'}"
 
+    def apply_to_environment(
+        self,
+        environment: MutableMapping[str, str] | None = None,
+    ) -> MutableMapping[str, str]:
+        return self.endpoint.apply_to_environment(environment)
+
     def to_dict(self) -> dict[str, Any]:
-        return {"endpoint": self.endpoint.to_dict(), "serial": self.serial}
+        return {
+            "platform": self.platform,
+            "endpoint": self.endpoint.to_dict(),
+            "serial": self.serial,
+        }
+
+
+# Execution lock scope shared by every iOS simulator task. The device UDID
+# distinguishes simulators inside the scope; "ios" keeps an iOS lock file
+# namespaced away from any Android serial of the same text.
+IOS_LOCK_SCOPE = "ios"
+
+
+@dataclass(frozen=True, slots=True)
+class IosTarget:
+    """An iOS simulator UDID bound to the local CoreSimulator service."""
+
+    serial: str | None = None
+
+    @property
+    def platform(self) -> str:
+        return "ios"
+
+    @property
+    def lock_scope(self) -> str:
+        return IOS_LOCK_SCOPE
+
+    @property
+    def lock_key(self) -> str:
+        return f"{self.lock_scope}/{self.serial or 'pending'}"
+
+    def apply_to_environment(
+        self,
+        environment: MutableMapping[str, str] | None = None,
+    ) -> MutableMapping[str, str]:
+        target = environment if environment is not None else os.environ
+        # LOCK_SCOPE_ENV names the execution scope generically: the ADB
+        # endpoint identity for Android, the platform tag for iOS simulators.
+        target[ADB_ENDPOINT_ID_ENV] = self.lock_scope
+        # An iOS worker never touches ADB: a stale serial must not leak in.
+        target.pop("ADB_DEVICE_SERIAL", None)
+        return target
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"platform": self.platform, "serial": self.serial}
 
 
 class AdbSession:
