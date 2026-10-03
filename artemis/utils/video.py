@@ -21,11 +21,13 @@ Recording session types and the session registry live in
 import asyncio
 import importlib.util
 import json
+import math
 from pathlib import Path
 import re
 import shutil
-import time
 import subprocess
+import sys
+import time
 from typing import Any
 
 import cv2
@@ -289,20 +291,51 @@ async def remux_recording_to_mp4(source_path: Path, output_path: Path) -> bool:
     return False
 
 
+def _probe_video_segment_cv2(video_path: Path) -> dict[str, float | int]:
+    """Read metadata from a finalized CFR video when ffprobe is unavailable."""
+    capture = cv2.VideoCapture(str(video_path))
+    try:
+        width = capture.get(cv2.CAP_PROP_FRAME_WIDTH)
+        height = capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        fps = capture.get(cv2.CAP_PROP_FPS)
+        frame_count = capture.get(cv2.CAP_PROP_FRAME_COUNT)
+    finally:
+        capture.release()
+    if not (
+        math.isfinite(width)
+        and math.isfinite(height)
+        and math.isfinite(fps)
+        and math.isfinite(frame_count)
+        and width > 0
+        and height > 0
+        and fps > 0
+        and frame_count > 0
+    ):
+        return {}
+    return {
+        "duration": frame_count / fps,
+        "width": int(width),
+        "height": int(height),
+    }
+
+
 async def probe_video_segment(video_path: Path) -> dict[str, float | int]:
     """Read duration and coded dimensions for a finalized segment."""
-    process = await asyncio.create_subprocess_exec(
-        get_ffprobe_path(),
-        "-v",
-        "error",
-        "-show_entries",
-        "stream=width,height,duration,codec_type:format=duration",
-        "-of",
-        "json",
-        str(video_path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            get_ffprobe_path(),
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=width,height,duration,codec_type:format=duration",
+            "-of",
+            "json",
+            str(video_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        return await asyncio.to_thread(_probe_video_segment_cv2, video_path)
     stdout, _stderr = await process.communicate()
     if process.returncode != 0:
         return {}
@@ -564,8 +597,16 @@ def is_scrcpy_installed() -> bool:
     return shutil.which("scrcpy") is not None
 
 
-def detect_video_tools_enabled() -> bool:
-    """Check if both scrcpy and ffmpeg are available to enable automated video features."""
+def detect_video_tools_enabled(platform: str = "android") -> bool:
+    """Check whether the platform's recording toolchain is available locally.
+
+    iOS uses native ``xcrun simctl io recordVideo`` capture plus the bundled
+    FFmpeg for post-processing; Android requires scrcpy plus FFmpeg.
+    """
+    if platform == "ios":
+        return (
+            sys.platform == "darwin" and shutil.which("xcrun") is not None and is_ffmpeg_installed()
+        )
     return is_ffmpeg_installed() and is_scrcpy_installed()
 
 

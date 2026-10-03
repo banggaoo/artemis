@@ -148,7 +148,6 @@ async def execute_task(
     target_serial = device_serial
     if platform == DevicePlatform.IOS:
         target_serial = target_serial or "booted"
-        config.with_video_recording_tools(enabled=False)
     else:
         target_serial = (
             target_serial or settings.ADB_DEVICE_SERIAL or os.environ.get("ADB_DEVICE_SERIAL")
@@ -359,14 +358,9 @@ def run_command(
             )
         if locked_app_package:
             raise typer.BadParameter("--locked-app is unavailable for iOS simulator tasks.")
-        if with_video_recording_tools:
-            raise typer.BadParameter(
-                "iOS video analysis is unavailable; omit --with-video-recording-tools."
-            )
         is_standalone = True
         console.print("[dim]Running the iOS simulator task in standalone mode.[/dim]")
-    else:
-        ensure_video_recording_available(with_video_recording_tools)
+    ensure_video_recording_available(with_video_recording_tools)
 
     # All platforms route through unified Artemis Daemon unless specifically configured as standalone
     if not is_worker and not is_standalone:
