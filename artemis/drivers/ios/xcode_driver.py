@@ -27,8 +27,10 @@ from PIL import Image
 from artemis.drivers.base import BaseDeviceDriver, KeyCode, ScreenData, SwipeDirection
 from artemis.drivers.ios.bridge import XcodeApprovalRequiredError, XcodeBridge
 from artemis.drivers.ios.hierarchy import application_bundle, parse_hierarchy
+from artemis.drivers.ios.recording import IosRecordingSession, IosScreenRecorder
 from third_party.mobile_use.controllers.types import ElementQuery
 from third_party.mobile_use.utils.logger import get_logger
+from third_party.mobile_use.utils.video import get_active_session, remove_active_session
 
 logger = get_logger(__name__)
 
@@ -82,6 +84,7 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
         self._bridge = XcodeBridge()
         self._connect_lock = asyncio.Lock()
         self._operation_lock = asyncio.Lock()
+        self._recorder: IosScreenRecorder | None = None
 
     @property
     def device_id(self) -> str:
@@ -218,20 +221,36 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
                 raise
 
     async def disconnect(self) -> None:
-        async with self._operation_lock:
-            key, self._session_key = self._session_key, None
-            try:
-                if key:
-                    # A timeout retires the old connection; cleanup may create
-                    # a fresh bridge solely to close the known native session.
-                    if not self._bridge.connected:
-                        await self._bridge.start()
-                    await self._bridge.call(
-                        "DeviceInteractionEndSession", {"interactionSessionKey": key}
-                    )
-            finally:
-                self._scale = None
-                await self._bridge.close()
+        try:
+            if self._recorder is not None:
+                session = self._recorder.session
+                if session is not None:
+                    if session.is_active:
+                        try:
+                            await self._recorder.stop()
+                        except Exception as exc:
+                            logger.error(
+                                f"iOS recording finalization failed during disconnect: {exc}"
+                            )
+                    if get_active_session(self._device_id) is session:
+                        remove_active_session(self._device_id)
+        finally:
+            async with self._operation_lock:
+                key, self._session_key = self._session_key, None
+                try:
+                    if key:
+                        # A timeout retires the old connection; cleanup may
+                        # create a fresh bridge solely to close the known
+                        # native session.
+                        if not self._bridge.connected:
+                            await self._bridge.start()
+                        await self._bridge.call(
+                            "DeviceInteractionEndSession",
+                            {"interactionSessionKey": key},
+                        )
+                finally:
+                    self._scale = None
+                    await self._bridge.close()
 
     async def _synthesize(self, command: str = "", activation: str | None = None) -> dict[str, Any]:
         self._require_connected()
@@ -471,8 +490,32 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
     async def execute_shell(self, command: str, timeout_seconds: float = 15.0) -> str:
         raise NotImplementedError("Android shell commands are unavailable on iOS Simulator.")
 
-    async def start_video_recording(self, output_dir: Path | None = None) -> None:
-        raise NotImplementedError("Video recording is not yet integrated for iOS Simulator.")
+    # --- Recording (native simctl segmented capture) ---
+
+    @property
+    def recording_session(self) -> IosRecordingSession | None:
+        """Latest recording session, retained for error reporting after stop."""
+        if self._recorder is None:
+            return None
+        return self._recorder.session
+
+    async def start_video_recording(
+        self, output_dir: Path | None = None, max_duration_seconds: int = 900
+    ) -> None:
+        self._require_connected()
+        if not self._device_id:
+            raise RuntimeError("iOS recording requires a pinned simulator UDID")
+        if self._recorder is None:
+            self._recorder = IosScreenRecorder(self._device_id)
+        await self._recorder.start(output_dir, max_duration_seconds)
+
+    async def seal_recording_segment(self, through_time: float | None = None) -> None:
+        """Seal the current segment so its final MP4 can be read safely."""
+        if self._recorder is not None:
+            await self._recorder.seal(through_time)
 
     async def stop_video_recording(self) -> str | None:
-        return None
+        if self._recorder is None:
+            return None
+        path = await self._recorder.stop()
+        return str(path) if path is not None else None
