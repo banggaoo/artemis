@@ -919,7 +919,9 @@ class OperatorNode:
         # The analyzer is always available: the "output truncated, use
         # analyze_task_output" hint arrives mid-turn, and tools are bound once per
         # turn, so a conditional mount would be one turn late.
-        if not any(t.name == "analyze_task_output" for t in all_tools):
+        if getattr(getattr(self.ctx, "device", None), "mobile_platform", None) != "ios" and not any(
+            t.name == "analyze_task_output" for t in all_tools
+        ):
             all_tools.append(analyze_task_output_wrapper.tool_fn_getter(self.ctx))
 
         traced_tools = [trace_langchain_tool(t, self.ctx) for t in all_tools]

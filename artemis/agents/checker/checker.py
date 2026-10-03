@@ -255,6 +255,8 @@ def _load_prompts() -> dict[str, str]:
 
 
 def probes_enabled(ctx: ArtemisContext) -> bool:
+    if getattr(getattr(ctx, "device", None), "mobile_platform", None) == "ios":
+        return False
     setup = getattr(ctx, "execution_setup", None)
     return not (setup and getattr(setup, "disable_device_probes", False))
 

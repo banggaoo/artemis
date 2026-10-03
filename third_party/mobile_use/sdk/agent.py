@@ -123,7 +123,10 @@ class AgentBase:
         target_dev = device_serial or device_id
         if target_dev:
             self._config = self._config.model_copy(
-                update={"device_id": target_dev, "device_platform": DevicePlatform.ANDROID}
+                update={
+                    "device_id": target_dev,
+                    "device_platform": self._config.device_platform or DevicePlatform.ANDROID,
+                }
             )
 
         return await self._init_internal(
@@ -440,6 +443,8 @@ class AgentBase:
             llm_config=agent_profile.llm_config,
             agent_config=self._config,
         )
+        if context.device.mobile_platform == DevicePlatform.IOS:
+            context._active_driver = getattr(self, "_ios_driver", None)
 
         output_config = None
         if request.output_description or request.output_format:
@@ -516,12 +521,15 @@ class AgentBase:
                 # DataEngine uses a shared database, so a queued task must not
                 # publish a new active session while the current task is still
                 # finishing.
+                if context.device.mobile_platform == DevicePlatform.IOS:
+                    await self._ensure_device_unlocked()
                 self._prepare_tracing(task=task, context=context)
                 self._prepare_output_files(task=task)
                 if os.environ.get("ARTEMIS_CLOUD_MODE") != "1":
                     if self._ui_adb_client is not None:
                         await self._connect_screen_client(context, str(sess_id))
-                    await self._ensure_device_unlocked()
+                    if context.device.mobile_platform != DevicePlatform.IOS:
+                        await self._ensure_device_unlocked()
                 publish_startup_progress(
                     "environment", "Preparing the device environment", session_id=str(sess_id)
                 )
@@ -749,6 +757,10 @@ class AgentBase:
 
                 raise
             finally:
+                # The native simulator transport is task-owned even when setup
+                # fails before entering the context manager.
+                if context.device.mobile_platform == DevicePlatform.IOS:
+                    await context.disconnect_driver()
                 try:
                     # Background ADB processes (logcat, screenrecord, ...) started
                     # by the Operator must not outlive the automation task.

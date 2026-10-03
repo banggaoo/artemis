@@ -20,6 +20,7 @@ from typing import Annotated
 
 from langchain_core.callbacks.base import Callbacks
 from artemis.config import checker_overrides_for_level, settings
+from artemis.context import DevicePlatform
 from artemis.utils.startup_progress import publish_startup_progress
 from third_party.mobile_use.main import (
     GoalArgument,
@@ -63,6 +64,7 @@ async def execute_task(
     explorer_flash_mode: str | None = None,
     explorer_pro_mode: str | None = None,
     verification_level: str | None = None,
+    platform: DevicePlatform = DevicePlatform.ANDROID,
 ) -> None:
     """Executes a single mobile automation task end-to-end.
 
@@ -84,6 +86,9 @@ async def execute_task(
         verification_level: Coarse Checker preset ('off', 'final', 'checkpoints',
             'strict'); applied before the explicit ``enable_checker`` switch.
     """
+    platform = DevicePlatform(platform)
+    if platform == DevicePlatform.IOS and os.environ.get("ARTEMIS_CLOUD_MODE") == "1":
+        raise ValueError("iOS Simulator support is local only; cloud mode targets Android.")
     effective_sid = (
         session_id or os.getenv("ARTEMIS_SESSION_ID") or os.getenv("ARTEMIS_CLOUD_SESSION_ID")
     )
@@ -134,10 +139,15 @@ async def execute_task(
             pro_mode=explorer_pro_mode,
         )
 
-    target_serial = (
-        device_serial or settings.ADB_DEVICE_SERIAL or os.environ.get("ADB_DEVICE_SERIAL")
-    )
-    if not target_serial:
+    target_serial = device_serial
+    if platform == DevicePlatform.IOS:
+        target_serial = target_serial or "booted"
+        config.with_video_recording_tools(enabled=False)
+    else:
+        target_serial = (
+            target_serial or settings.ADB_DEVICE_SERIAL or os.environ.get("ADB_DEVICE_SERIAL")
+        )
+    if not target_serial and platform == DevicePlatform.ANDROID:
         try:
             from artemis.runtime import device_pool
 
@@ -146,9 +156,7 @@ async def execute_task(
             target_serial = None
 
     if target_serial:
-        from artemis.context import DevicePlatform
-
-        config.for_device(DevicePlatform.ANDROID, target_serial)
+        config.for_device(platform, target_serial)
 
     if graph_config_callbacks:
         config.with_graph_config_callbacks(graph_config_callbacks)
@@ -176,6 +184,15 @@ def run_command(
             help="Execution profile ('flash' for fast reactive, 'pro' for full graph).",
         ),
     ] = "pro",
+    platform: Annotated[
+        DevicePlatform,
+        typer.Option(
+            "--platform",
+            metavar="PLATFORM",
+            rich_help_panel="Platform",
+            help="Target mobile platform: Android (default) or a local iOS simulator.",
+        ),
+    ] = DevicePlatform.ANDROID,
     locked_app_package: Annotated[
         str | None,
         typer.Option(
@@ -192,7 +209,7 @@ def run_command(
         str | None,
         typer.Option(
             "--app-path",
-            help="Local APK path to install before starting the task.",
+            help="Local Android APK or iOS simulator .app directory to install before the task.",
         ),
     ] = None,
     enable_planner_validation: Annotated[
@@ -278,7 +295,7 @@ def run_command(
         typer.Option(
             "--device-serial",
             "-s",
-            help="Target specific Android device by serial number (e.g. emulator-5554).",
+            help="Android serial or iOS simulator UDID; iOS defaults to the single 'booted' simulator.",
         ),
     ] = None,
     session_id: Annotated[
@@ -296,8 +313,7 @@ def run_command(
         ),
     ] = False,
 ) -> None:
-    """Run an autonomous UI automation task on the connected Android device."""
-    ensure_video_recording_available(with_video_recording_tools)
+    """Run an autonomous UI automation task on an Android device or iOS simulator."""
 
     console = Console()
 
@@ -306,6 +322,26 @@ def run_command(
         or os.environ.get("ARTEMIS_DEVICE_QUEUE_TICKET") is not None
     )
     is_standalone = standalone or os.environ.get("ARTEMIS_STANDALONE") == "1"
+
+    if platform == DevicePlatform.IOS:
+        if os.environ.get("ARTEMIS_CLOUD_MODE") == "1":
+            raise typer.BadParameter(
+                "iOS Simulator support is local only; cloud mode targets Android."
+            )
+        if is_worker:
+            raise typer.BadParameter(
+                "The daemon and device queue support Android only; run iOS tasks locally."
+            )
+        if locked_app_package:
+            raise typer.BadParameter("--locked-app is unavailable for iOS simulator tasks.")
+        if with_video_recording_tools:
+            raise typer.BadParameter(
+                "iOS video analysis is unavailable; omit --with-video-recording-tools."
+            )
+        is_standalone = True
+        console.print("[dim]Running the iOS simulator task in standalone mode.[/dim]")
+    else:
+        ensure_video_recording_available(with_video_recording_tools)
 
     # All platforms route through unified Artemis Daemon unless specifically configured as standalone
     if not is_worker and not is_standalone:
@@ -390,7 +426,8 @@ def run_command(
                 f"[yellow]Daemon routing notice: {exc}. Falling back to local execution...[/yellow]"
             )
 
-    display_local_device_status(console, host=settings.ADB_HOST, port=settings.ADB_PORT)
+    if platform == DevicePlatform.ANDROID:
+        display_local_device_status(console, host=settings.ADB_HOST, port=settings.ADB_PORT)
 
     cancelled = False
     original_sigterm = None
@@ -427,6 +464,7 @@ def run_command(
                 explorer_flash_mode=explorer_flash_mode,
                 explorer_pro_mode=explorer_pro_mode,
                 verification_level=verification_level,
+                platform=platform,
             )
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
