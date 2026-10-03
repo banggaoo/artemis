@@ -39,7 +39,13 @@ def create_driver(ctx: "ArtemisContext") -> BaseDeviceDriver:
             raise ValueError("iOS Simulator support is local only; cloud mode targets Android.")
         from artemis.drivers.ios.xcode_driver import XcodeSimulatorDriver
 
-        return XcodeSimulatorDriver(device_id=ctx.device.device_id)
+        config = getattr(ctx, "agent_config", None)
+        return XcodeSimulatorDriver(
+            device_id=ctx.device.device_id,
+            workspace_path=(
+                getattr(config, "ios_workspace_path", None) if config is not None else None
+            ),
+        )
     if mobile_platform not in {"android", "mock"}:
         raise ValueError(f"Unsupported mobile platform: {mobile_platform}")
 

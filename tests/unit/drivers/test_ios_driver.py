@@ -25,6 +25,7 @@ import pytest
 
 from artemis.drivers.base import KeyCode
 from artemis.drivers.ios import xcode_driver
+from artemis.drivers.ios.bridge import XcodeApprovalRequiredError
 from artemis.drivers.ios.hierarchy import application_bundle, parse_hierarchy
 from artemis.drivers.ios.xcode_driver import XcodeSimulatorDriver, run_xcrun
 from third_party.mobile_use.controllers.types import ElementQuery
@@ -63,6 +64,7 @@ class NativeBridge:
         self.close = AsyncMock(side_effect=self.finish)
         self.call = AsyncMock(side_effect=self.respond)
         self.observation = observation
+        self.hooks = {}
         self.start_result = {
             "interactionSessionKey": "test-session",
             "deviceUUID": IOS_A,
@@ -76,12 +78,16 @@ class NativeBridge:
         self.connected = False
 
     async def respond(self, name, arguments):
+        if name in self.hooks:
+            return await self.hooks[name](arguments)
         if name == "DeviceInteractionStartSession":
             return self.start_result
         if name == "DeviceInteractionSynthesize":
             return self.observation
         if name == "DeviceInteractionEndSession":
             return {"userMessage": "Closed"}
+        if name == "XcodeOpenWorkspace":
+            return {"workspaceIdentifier": "workspace-1"}
         raise AssertionError(f"Unexpected native tool {name}")
 
 
@@ -612,3 +618,212 @@ async def test_simctl_failures_report_stderr_and_preserve_literal_argv(monkeypat
     with pytest.raises(RuntimeError, match="No app"):
         await run_xcrun("simctl", "openurl", IOS_A, url)
     assert spawn.await_args.args == ("xcrun", "simctl", "openurl", IOS_A, url)
+
+
+DENIAL = "This agent isn't approved to use Xcode's tools yet. Call XcodeOpenWorkspace first."
+PENDING = "Xcode is waiting for the user to approve this request; it has been recorded."
+
+
+def _tool_names(native):
+    return [call.args[0] for call in native.call.call_args_list]
+
+
+@pytest.mark.asyncio
+async def test_initial_approval_refusal_opens_workspace_once_and_retries_start(simulator, tmp_path):
+    project = tmp_path / "Example App [2].xcodeproj"
+    project.mkdir()
+    native = simulator.native
+    native.tools.add("XcodeOpenWorkspace")
+    starts = []
+
+    async def start_hook(arguments):
+        starts.append(dict(arguments))
+        if len(starts) == 1:
+            raise XcodeApprovalRequiredError("DeviceInteractionStartSession", DENIAL)
+        return native.start_result
+
+    native.hooks["DeviceInteractionStartSession"] = start_hook
+    driver = XcodeSimulatorDriver(workspace_path=project)
+    await driver.connect()
+    assert _tool_names(native) == [
+        "DeviceInteractionStartSession",
+        "XcodeOpenWorkspace",
+        "DeviceInteractionStartSession",
+        "DeviceInteractionSynthesize",
+    ]
+    assert native.call.call_args_list[1].args == (
+        "XcodeOpenWorkspace",
+        {"path": str(project)},
+    )
+    assert starts[0] == starts[1]
+    assert starts[0]["deviceIdentifier"] == IOS_A
+    invoked = [call.args for call in simulator.commands.call_args_list]
+    assert ("simctl", "boot") not in [args[:2] for args in invoked]
+    assert not any("mcp-server" in args for args in invoked)
+    await driver.disconnect()
+    assert "DeviceInteractionEndSession" in _tool_names(native)
+
+
+@pytest.mark.asyncio
+async def test_pending_workspace_approval_propagates_without_retry(simulator, tmp_path):
+    project = tmp_path / "App.xcodeproj"
+    project.mkdir()
+    native = simulator.native
+    native.tools.add("XcodeOpenWorkspace")
+
+    async def fail_start(arguments):
+        raise XcodeApprovalRequiredError("DeviceInteractionStartSession", DENIAL)
+
+    async def pending_open(arguments):
+        raise XcodeApprovalRequiredError("XcodeOpenWorkspace", PENDING)
+
+    native.hooks["DeviceInteractionStartSession"] = fail_start
+    native.hooks["XcodeOpenWorkspace"] = pending_open
+    driver = XcodeSimulatorDriver(workspace_path=project)
+    with pytest.raises(XcodeApprovalRequiredError, match="waiting for the user") as caught:
+        await driver.connect()
+    assert caught.value.workspace_path == project
+    assert str(project) in caught.value.guidance
+    assert "not supplied" not in caught.value.guidance
+    assert _tool_names(native) == ["DeviceInteractionStartSession", "XcodeOpenWorkspace"]
+    native.start.assert_awaited_once()
+    native.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identifier", [None, "", 123])
+async def test_malformed_workspace_acceptance_fails_closed(simulator, tmp_path, identifier):
+    project = tmp_path / "App.xcodeproj"
+    project.mkdir()
+    native = simulator.native
+    native.tools.add("XcodeOpenWorkspace")
+
+    async def fail_start(arguments):
+        raise XcodeApprovalRequiredError("DeviceInteractionStartSession", DENIAL)
+
+    async def open_workspace(arguments):
+        return {"workspaceIdentifier": identifier}
+
+    native.hooks["DeviceInteractionStartSession"] = fail_start
+    native.hooks["XcodeOpenWorkspace"] = open_workspace
+    driver = XcodeSimulatorDriver(workspace_path=project)
+    with pytest.raises(RuntimeError, match="no usable workspace identifier"):
+        await driver.connect()
+    assert _tool_names(native) == ["DeviceInteractionStartSession", "XcodeOpenWorkspace"]
+    native.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_still_pending_after_workspace_open_stops_after_one_retry(simulator, tmp_path):
+    project = tmp_path / "App.xcodeproj"
+    project.mkdir()
+    native = simulator.native
+    native.tools.add("XcodeOpenWorkspace")
+
+    async def fail_start(arguments):
+        raise XcodeApprovalRequiredError("DeviceInteractionStartSession", PENDING)
+
+    native.hooks["DeviceInteractionStartSession"] = fail_start
+    driver = XcodeSimulatorDriver(workspace_path=project)
+    with pytest.raises(XcodeApprovalRequiredError, match="waiting for the user") as caught:
+        await driver.connect()
+    assert caught.value.workspace_path == project
+    assert _tool_names(native) == [
+        "DeviceInteractionStartSession",
+        "XcodeOpenWorkspace",
+        "DeviceInteractionStartSession",
+    ]
+    native.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_approval_refusal_without_workspace_propagates_guidance(simulator):
+    native = simulator.native
+    native.tools.add("XcodeOpenWorkspace")
+
+    async def fail_start(arguments):
+        raise XcodeApprovalRequiredError("DeviceInteractionStartSession", DENIAL)
+
+    native.hooks["DeviceInteractionStartSession"] = fail_start
+    with pytest.raises(XcodeApprovalRequiredError) as caught:
+        await simulator.driver.connect()
+    assert _tool_names(native) == ["DeviceInteractionStartSession"]
+    assert caught.value.workspace_path is None
+    assert "Workspace: not supplied" in caught.value.guidance
+    assert "--ios-workspace" in caught.value.guidance
+    native.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_approved_sessions_never_open_workspace(simulator, tmp_path):
+    project = tmp_path / "App.xcodeproj"
+    project.mkdir()
+    simulator.native.tools.add("XcodeOpenWorkspace")
+    driver = XcodeSimulatorDriver(workspace_path=project)
+    await driver.connect()
+    await driver.connect()
+    names = _tool_names(simulator.native)
+    assert "XcodeOpenWorkspace" not in names
+    assert names.count("DeviceInteractionStartSession") == 1
+    await driver.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("native boom"), TimeoutError("slow tool")])
+async def test_non_approval_failures_skip_workspace_and_retry(simulator, tmp_path, failure):
+    project = tmp_path / "App.xcodeproj"
+    project.mkdir()
+    native = simulator.native
+    native.tools.add("XcodeOpenWorkspace")
+
+    async def fail(arguments):
+        raise failure
+
+    native.hooks["DeviceInteractionStartSession"] = fail
+    driver = XcodeSimulatorDriver(workspace_path=project)
+    with pytest.raises(type(failure)):
+        await driver.connect()
+    assert _tool_names(native) == ["DeviceInteractionStartSession"]
+    native.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_missing_workspace_tool_reports_actionable_approval_error(simulator, tmp_path):
+    project = tmp_path / "App.xcodeproj"
+    project.mkdir()
+    native = simulator.native
+
+    async def fail_start(arguments):
+        raise XcodeApprovalRequiredError("DeviceInteractionStartSession", DENIAL)
+
+    native.hooks["DeviceInteractionStartSession"] = fail_start
+    driver = XcodeSimulatorDriver(workspace_path=project)
+    with pytest.raises(XcodeApprovalRequiredError, match="XcodeOpenWorkspace") as caught:
+        await driver.connect()
+    assert caught.value.workspace_path == project
+    assert str(project) in caught.value.guidance
+    assert _tool_names(native) == ["DeviceInteractionStartSession"]
+    native.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_workspace_must_be_existing_project_directory(simulator, tmp_path):
+    (tmp_path / "plain-folder").mkdir()
+    (tmp_path / "file.xcodeproj").write_text("x")
+    bad_paths = [
+        tmp_path / "missing.xcodeproj",
+        tmp_path / "plain-folder",
+        tmp_path / "file.xcodeproj",
+    ]
+    for path in bad_paths:
+        driver = XcodeSimulatorDriver(workspace_path=path)
+        with pytest.raises(ValueError, match="xcodeproj or .xcworkspace"):
+            await driver.connect()
+    simulator.commands.assert_not_called()
+    simulator.native.start.assert_not_called()
+
+    workspace = tmp_path / "Nested Dir [x].xcworkspace"
+    workspace.mkdir()
+    driver = XcodeSimulatorDriver(workspace_path=workspace)
+    await driver.connect()
+    await driver.disconnect()

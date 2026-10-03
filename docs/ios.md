@@ -77,6 +77,33 @@ To install a simulator build before the task, add
 `--app-path /absolute/path/MyApp.app`. The bundle's `Info.plist` must provide
 `CFBundleIdentifier`.
 
+### First-run Xcode approval
+
+The very first time a new Python interpreter asks Xcode for device access,
+Xcode requires user approval for that interpreter and, if one is supplied, the
+selected project folder. Point Artemis at an existing Xcode project or
+workspace so the request can be recorded:
+
+```bash
+uv run artemis run "Open Settings" --platform ios --standalone \
+  --ios-workspace /absolute/path/MyApp.xcodeproj
+```
+
+If approval is still pending, the run stops with an "Xcode Approval Required"
+panel instead of retrying. Approve the interpreter and the selected folder from
+the Xcode MCP menu bar icon, choosing **Always Allow** there if offered and you
+want later runs to skip the prompt; then rerun the task. Advanced users can instead
+inspect pending request IDs with `xcrun mcp-server status` and approve only
+those entries via `sudo xcrun mcp-server approve <REQUEST-ID> --always` from
+their own terminal; the CLI path requires admin rights and is performed by the
+user, never by Artemis.
+
+Granted approvals persist across fresh bridge processes; there is no need to
+keep a bridge alive. A different interpreter path or build, a different project
+folder, or an expiring grant can require approval again. The Always/persistent
+choice belongs to you and Xcode; Artemis requests only scoped approval for its
+interpreter and the folder you select and never enables global access.
+
 ## Embedded Python SDK
 
 Configure iOS through the embedded SDK's builder:
@@ -93,6 +120,24 @@ config = (
 )
 agent = Agent(config=config)
 ```
+
+To run the first-run approval flow against a specific project, pass the
+existing project or workspace through the builder:
+
+```python
+config = (
+    AgentConfigBuilder()
+    .for_ios_simulator(
+        "<SIMULATOR-UDID>",
+        workspace_path="/absolute/path/MyApp.xcodeproj",
+    )
+    .build()
+)
+```
+
+`with_ios_workspace(path)` applies the same setting, and `None` clears it.
+The path is used only if Xcode refuses the initial session with an approval
+error; already-approved runs never open a workspace.
 
 The generic builder also accepts
 `for_device(DevicePlatform.IOS, "<SIMULATOR-UDID>")`, with `DevicePlatform`

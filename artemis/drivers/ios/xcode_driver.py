@@ -25,7 +25,7 @@ from uuid import uuid4
 from PIL import Image
 
 from artemis.drivers.base import BaseDeviceDriver, KeyCode, ScreenData, SwipeDirection
-from artemis.drivers.ios.bridge import XcodeBridge
+from artemis.drivers.ios.bridge import XcodeApprovalRequiredError, XcodeBridge
 from artemis.drivers.ios.hierarchy import application_bundle, parse_hierarchy
 from third_party.mobile_use.controllers.types import ElementQuery
 from third_party.mobile_use.utils.logger import get_logger
@@ -64,9 +64,19 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
     report an error instead of returning a synthetic success.
     """
 
-    def __init__(self, device_id: str = "booted", width: int = 0, height: int = 0):
+    def __init__(
+        self,
+        device_id: str = "booted",
+        width: int = 0,
+        height: int = 0,
+        *,
+        workspace_path: str | Path | None = None,
+    ):
         self._device_id = device_id
         self._width, self._height = width, height
+        self._workspace_path = (
+            Path(workspace_path).expanduser().resolve() if workspace_path is not None else None
+        )
         self._scale: tuple[float, float] | None = None
         self._session_key: str | None = None
         self._bridge = XcodeBridge()
@@ -88,6 +98,18 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
             return self._device_id
 
     async def _resolve_device(self) -> dict[str, Any]:
+        if self._workspace_path is not None:
+            if (
+                self._workspace_path.suffix.lower()
+                not in {
+                    ".xcodeproj",
+                    ".xcworkspace",
+                }
+                or not self._workspace_path.is_dir()
+            ):
+                raise ValueError(
+                    "iOS workspace must be an existing .xcodeproj or .xcworkspace directory."
+                )
         if sys.platform != "darwin":
             raise RuntimeError("iOS Simulator support requires macOS and Xcode 27 or later.")
         version = (await run_xcrun("xcodebuild", "-version")).decode()
@@ -141,13 +163,34 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
                     "Xcode's native device interaction tools are unavailable. Select Xcode 27 and approve Artemis's access in Xcode."
                 )
             try:
-                session = await self._bridge.call(
-                    "DeviceInteractionStartSession",
-                    {
-                        "deviceIdentifier": self._device_id,
-                        "sessionIdentifier": f"Artemis Simulator {uuid4().hex[:8]}",
-                    },
-                )
+                start_arguments = {
+                    "deviceIdentifier": self._device_id,
+                    "sessionIdentifier": f"Artemis Simulator {uuid4().hex[:8]}",
+                }
+                try:
+                    session = await self._bridge.call(
+                        "DeviceInteractionStartSession", start_arguments
+                    )
+                except XcodeApprovalRequiredError:
+                    if self._workspace_path is None:
+                        raise
+                    if "XcodeOpenWorkspace" not in self._bridge.tools:
+                        raise XcodeApprovalRequiredError(
+                            "DeviceInteractionStartSession",
+                            "Xcode's XcodeOpenWorkspace tool is unavailable; "
+                            "approve Artemis's access in Xcode.",
+                        )
+                    opened = await self._bridge.call(
+                        "XcodeOpenWorkspace", {"path": str(self._workspace_path)}
+                    )
+                    identifier = opened.get("workspaceIdentifier")
+                    if not isinstance(identifier, str) or not identifier:
+                        raise RuntimeError(
+                            "XcodeOpenWorkspace returned no usable workspace identifier."
+                        )
+                    session = await self._bridge.call(
+                        "DeviceInteractionStartSession", start_arguments
+                    )
                 self._session_key = session.get("interactionSessionKey")
                 if not self._session_key:
                     raise RuntimeError("Xcode did not return a device interaction session key.")
@@ -157,7 +200,15 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
                 ):
                     raise RuntimeError("Xcode selected a different device; refusing to interact.")
                 await self.get_screen_data(skip_settling=True)
-            except (OSError, ValueError, RuntimeError, TimeoutError, asyncio.CancelledError):
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                TimeoutError,
+                asyncio.CancelledError,
+            ) as error:
+                if isinstance(error, XcodeApprovalRequiredError):
+                    error.workspace_path = self._workspace_path
                 try:
                     await self.disconnect()
                 except (OSError, ValueError, RuntimeError, TimeoutError) as cleanup_error:

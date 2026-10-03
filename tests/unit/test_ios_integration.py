@@ -38,6 +38,7 @@ from artemis.mcp.actuators.ios import IosActuator
 from artemis.sdk.agent import Agent
 from artemis.sdk.builders.agent_config_builder import AgentConfigBuilder
 from artemis.tools.mobile.launch_app import find_package, launch_app
+from artemis.drivers.ios.bridge import XcodeApprovalRequiredError
 from artemis.runtime import DeviceBusyError
 from third_party.mobile_use.sdk.agent import AgentBase
 from third_party.mobile_use.sdk.types.exceptions import AgentError, AgentNotInitializedError
@@ -109,8 +110,28 @@ def test_factory_selects_ios_without_creating_adb(native_driver, monkeypatch):
     monkeypatch.setattr("artemis.drivers.factory.AdbClient", adb)
     context = ios_context()
     assert create_driver(context) is native_driver
-    native_driver.constructor.assert_called_once_with(device_id="booted")
+    native_driver.constructor.assert_called_once_with(device_id="booted", workspace_path=None)
     assert context.adb_client is None
+
+
+def test_factory_forwards_configured_ios_workspace(native_driver, tmp_path):
+    project = tmp_path / "My App.xcodeproj"
+    project.mkdir()
+    context = ios_context()
+    context.agent_config = (
+        AgentConfigBuilder()
+        .for_ios_simulator()
+        .with_ios_workspace(project)
+        .build(validate_profiles=False)
+    )
+    assert create_driver(context) is native_driver
+    native_driver.constructor.assert_called_once_with(device_id="booted", workspace_path=project)
+
+
+def test_factory_tolerates_missing_agent_config(native_driver):
+    context = ios_context()
+    assert create_driver(context) is native_driver
+    native_driver.constructor.assert_called_once_with(device_id="booted", workspace_path=None)
 
 
 def test_macos_host_keeps_android_default(monkeypatch):
@@ -150,6 +171,22 @@ async def test_sdk_ios_initialization_bypasses_android_and_cleans(native_driver,
     await agent.clean()
     native_driver.disconnect.assert_awaited_once()
     assert agent._initialized is False
+
+
+@pytest.mark.asyncio
+async def test_sdk_init_forwards_ios_workspace(native_driver, tmp_path):
+    project = tmp_path / "Example.xcodeproj"
+    project.mkdir()
+    config = (
+        AgentConfigBuilder()
+        .for_ios_simulator(workspace_path=project)
+        .build(validate_profiles=False)
+    )
+    agent = Agent(config=config)
+    agent._prewarm_llm_connections = AsyncMock()
+    assert await agent.init() is True
+    native_driver.constructor.assert_called_once_with(device_id="booted", workspace_path=project)
+    await agent.clean()
 
 
 @pytest.mark.asyncio
@@ -284,6 +321,31 @@ async def test_execute_task_ios_ignores_android_selection(monkeypatch):
     automation.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_execute_task_ios_forwards_workspace(native_driver, monkeypatch, tmp_path):
+    project = tmp_path / "My App.xcodeproj"
+    project.mkdir()
+    builder = MagicMock()
+    automation = AsyncMock()
+    monkeypatch.setattr(run_module, "new_default_config_builder", lambda: builder)
+    monkeypatch.setattr(run_module, "run_automation", automation)
+    await run_module.execute_task(
+        "Open Settings", platform=DevicePlatform.IOS, ios_workspace_path=project
+    )
+    builder.with_ios_workspace.assert_called_once_with(project)
+    automation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_task_rejects_workspace_without_ios(native_driver, tmp_path):
+    project = tmp_path / "App.xcodeproj"
+    project.mkdir()
+    with pytest.raises(ValueError, match="--platform ios"):
+        await run_module.execute_task(
+            "Open Settings", platform=DevicePlatform.ANDROID, ios_workspace_path=project
+        )
+
+
 def test_cli_ios_runs_locally_without_android_status_or_daemon(monkeypatch):
     execute = AsyncMock()
     monkeypatch.setattr(run_module, "execute_task", execute)
@@ -303,6 +365,52 @@ def test_cli_ios_runs_locally_without_android_status_or_daemon(monkeypatch):
     assert result.exit_code == 0, result.output
     assert execute.call_args.kwargs["platform"] == DevicePlatform.IOS
     assert execute.call_args.kwargs["device_serial"] == "booted"
+
+
+def test_cli_forwards_ios_workspace(monkeypatch, tmp_path):
+    project = tmp_path / "My App.xcodeproj"
+    project.mkdir()
+    execute = AsyncMock()
+    monkeypatch.setattr(run_module, "execute_task", execute)
+    result = CliRunner().invoke(
+        app,
+        ["run", "--platform", "ios", "--ios-workspace", str(project), "Open Settings"],
+    )
+    assert result.exit_code == 0, result.output
+    assert execute.call_args.kwargs["ios_workspace_path"] == project
+
+
+def test_cli_rejects_ios_workspace_for_android(monkeypatch, tmp_path):
+    project = tmp_path / "App.xcodeproj"
+    project.mkdir()
+    execute = AsyncMock()
+    monkeypatch.setattr(run_module, "execute_task", execute)
+    monkeypatch.setattr(
+        "artemis.runtime.ensure_daemon_running", MagicMock(side_effect=AssertionError("daemon"))
+    )
+    result = CliRunner().invoke(app, ["run", "--ios-workspace", str(project), "Open Settings"])
+    assert result.exit_code != 0
+    execute.assert_not_called()
+
+
+def test_cli_approval_error_exits_2_with_guidance_panel(monkeypatch):
+    monkeypatch.setattr(
+        run_module,
+        "execute_task",
+        AsyncMock(
+            side_effect=XcodeApprovalRequiredError(
+                "DeviceInteractionStartSession",
+                "This agent isn't approved to use Xcode's tools yet.",
+            )
+        ),
+    )
+    result = CliRunner().invoke(app, ["run", "--platform", "ios", "Open Settings"])
+    assert result.exit_code == 2, result.output
+    assert "Xcode Approval Required" in result.output
+    assert "Always Allow" in result.output
+    assert "isn't approved" in result.output
+    assert "Missing API Key" not in result.output
+    assert "GEMINI" not in result.output
 
 
 @pytest.mark.parametrize("env_name", ["ARTEMIS_CLOUD_MODE", "ARTEMIS_TASK_WORKER"])
