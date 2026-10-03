@@ -21,15 +21,13 @@ exit; restart gaps stay gaps in rendered clips.
 """
 
 import asyncio
-from io import BytesIO
 from pathlib import Path
+import re
 import signal
 import tempfile
 import time
 from typing import Any
 from uuid import uuid4
-
-from PIL import Image
 
 from artemis.config.paths import get_temp_dir
 from artemis.utils.video import (
@@ -65,26 +63,44 @@ class IosRecordingSession(RecordingSession):
     conversion_tasks: list[asyncio.Task] = []
 
 
+def _parse_display_dimensions(text: str) -> tuple[int, int] | None:
+    """Largest ``IOSurface port`` (width, height) from ``simctl io enumerate``.
+
+    ``recordVideo`` captures the device LCD without ``--display``; only that
+    framebuffer reports an ``IOSurface port`` (external scene displays carry
+    only ``Default width``/``height``), and its dimensions swap on rotation,
+    so the largest reported surface is the segment's coded size.
+    """
+    best: tuple[int, int] | None = None
+    best_area = 0
+    for match in re.finditer(
+        r"IOSurface port:\s*\n\s*width\s*=\s*(\d+)\s*\n\s*height\s*=\s*(\d+)", text
+    ):
+        width, height = int(match.group(1)), int(match.group(2))
+        if width * height > best_area:
+            best, best_area = (width, height), width * height
+    return best
+
+
 async def probe_display_dimensions(device_id: str) -> tuple[int, int] | None:
-    """Read the raw capture dimensions from a simctl PNG screenshot."""
+    """Read the recordVideo target display's pixel size via simctl."""
     try:
         process = await asyncio.create_subprocess_exec(
             "xcrun",
             "simctl",
             "io",
             device_id,
-            "screenshot",
-            "--type=png",
-            "-",
+            "enumerate",
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _stderr = await asyncio.wait_for(process.communicate(), PROBES_TIMEOUT_SECONDS)
-        with Image.open(BytesIO(stdout)) as image:
-            return image.size
-    except (OSError, TimeoutError, ValueError):
+    except (OSError, TimeoutError):
         return None
+    if process.returncode != 0:
+        return None
+    return _parse_display_dimensions(stdout.decode(errors="replace"))
 
 
 async def finalize_mov_to_mp4(
