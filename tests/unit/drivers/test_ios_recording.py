@@ -609,3 +609,60 @@ async def test_probe_falls_back_to_cv2_only_when_ffprobe_missing(monkeypatch, tm
     corrupted = tmp_path / "corrupt.mp4"
     corrupted.write_bytes(b"not a movie")
     assert await video_utils.probe_video_segment(corrupted) == {}
+
+
+# Mirrors real ``simctl io <udid> enumerate`` output on an iPhone simulator:
+# the LCD is the only display with an IOSurface port; external scene displays
+# (CarPlay wireless, resizable) report Default dims only and must be ignored.
+ENUMERATE_SAMPLE = """\
+Port:
+    UUID: 0E2F25F7-2FF1-44B7-93A2-36AE37042D2D
+    Class: Unknown
+    Port Identifier: com.apple.display.captureservice
+    Power state: On
+
+Port:
+    UUID: 99261FD3-48E9-4CB4-B58D-5D2AF9CB5538
+    Class: Display
+    Port Identifier: com.apple.framebuffer.display
+    Power state: On
+    Display class: 1
+    Default width: 720
+    Default height: 480
+    Default pixel format: 'BGRA'
+
+Port:
+    UUID: 9A996636-389D-48C9-86D4-D2A252086D44
+    Class: Display
+    Port Identifier: com.apple.framebuffer.display
+    Power state: On
+    Display class: 0
+    Default width: 1206
+    Default height: 2622
+    Default pixel format: 'BGRA'
+    IOSurface port:
+        width              = 1206
+        height             = 2622
+        bytes per row      = 4864
+        size               = 12763136
+
+Port:
+    UUID: E7A14973-04D1-456A-858D-BD0EEF2FF5D5
+    Class: Display
+    Port Identifier: com.apple.framebuffer.display
+    Power state: On
+    Display class: 1
+    Default width: 7680
+    Default height: 4320
+    Default pixel format: 'BGRA'
+"""
+
+
+def test_parse_display_dimensions_uses_iosurface_not_default_dims():
+    assert rec._parse_display_dimensions(ENUMERATE_SAMPLE) == (1206, 2622)
+    rotated = ENUMERATE_SAMPLE.replace(
+        "width              = 1206", "width              = 2622"
+    ).replace("height             = 2622", "height             = 1206")
+    assert rec._parse_display_dimensions(rotated) == (2622, 1206)
+    assert rec._parse_display_dimensions("Port:\n    Class: Unknown\n") is None
+    assert rec._parse_display_dimensions("") is None
