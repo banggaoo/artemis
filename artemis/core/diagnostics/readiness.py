@@ -41,8 +41,9 @@ CHECK_ORDER: dict[str, int] = {
     "integration_host": 2,
     "gemini_api_key": 3,
     "android_adb": 4,
-    "toolchain": 5,
-    "vision_ocr_key": 6,
+    "ios_simulators": 5,
+    "toolchain": 6,
+    "vision_ocr_key": 7,
 }
 
 

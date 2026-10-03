@@ -26,6 +26,7 @@ from PIL import Image
 
 from artemis.drivers.base import BaseDeviceDriver, KeyCode, ScreenData, SwipeDirection
 from artemis.drivers.ios.bridge import XcodeApprovalRequiredError, XcodeBridge
+from artemis.drivers.ios.discovery import parse_simctl_devices, run_xcrun
 from artemis.drivers.ios.hierarchy import application_bundle, parse_hierarchy
 from artemis.drivers.ios.recording import IosRecordingSession, IosScreenRecorder
 from third_party.mobile_use.controllers.types import ElementQuery
@@ -33,29 +34,6 @@ from third_party.mobile_use.utils.logger import get_logger
 from third_party.mobile_use.utils.video import get_active_session, remove_active_session
 
 logger = get_logger(__name__)
-
-
-async def run_xcrun(*arguments: str, timeout: float = 30.0) -> bytes:
-    """Run argv directly, reporting native errors and reaping cancelled children."""
-    process = await asyncio.create_subprocess_exec(
-        "xcrun",
-        *arguments,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
-    except (TimeoutError, asyncio.CancelledError):
-        if process.returncode is None:
-            process.kill()
-        await process.communicate()
-        raise
-    if process.returncode:
-        raise RuntimeError(
-            f"xcrun {' '.join(arguments[:3])} failed: {stderr.decode(errors='replace').strip()}"
-        )
-    return stdout
 
 
 class XcodeSimulatorDriver(BaseDeviceDriver):
@@ -122,13 +100,7 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
                 "Native iOS interaction requires Xcode 27 or later. Set DEVELOPER_DIR to select it."
             )
         devices = json.loads(await run_xcrun("simctl", "list", "devices", "--json"))
-        available = [
-            device
-            for runtime, entries in devices.get("devices", {}).items()
-            if ".iOS-" in runtime
-            for device in entries
-            if device.get("isAvailable")
-        ]
+        available = parse_simctl_devices(devices)
         if self._device_id == "booted":
             candidates = [device for device in available if device.get("state") == "Booted"]
             if len(candidates) != 1:

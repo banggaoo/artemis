@@ -32,6 +32,7 @@ from artemis.runtime import (
     DeviceExecutionLock,
     device_pool,
     ensure_daemon_running,
+    ios_device_pool,
     submit_task_to_daemon,
     trace_store,
 )
@@ -144,17 +145,22 @@ def _start_spawn_watchdog(
     ).start()
 
 
-def _validate_device_serial(device_serial: str) -> dict[str, Any] | None:
-    """Reject a task whose explicitly requested device is not attached and authorized.
+def _validate_device_serial(device_serial: str, platform: str = "android") -> dict[str, Any] | None:
+    """Reject a task whose explicitly requested device is not attached and usable.
 
     Returns a failure response dict when the serial must be rejected, or None when
-    the device is usable. If device enumeration itself fails (no adb available),
+    the device is usable. If device enumeration itself fails (no adb/xcrun),
     validation is skipped rather than blocking task submission.
     """
     try:
-        # The shared validator fails open on an indeterminate/empty enumeration:
+        # The shared validators fail open on an indeterminate/empty enumeration:
         # the task proceeds and fails downstream with a clear no-device error.
-        detail = device_pool.validate_explicit_serial(device_serial)
+        if platform == "ios":
+            detail = ios_device_pool.validate_explicit_serial(device_serial)
+            inspect_hint = "Run `xcrun simctl list devices` to inspect simulators"
+        else:
+            detail = device_pool.validate_explicit_serial(device_serial)
+            inspect_hint = "Run `adb devices -l` to inspect attached hardware"
     except Exception:
         return None
     if detail is None:
@@ -164,8 +170,8 @@ def _validate_device_serial(device_serial: str) -> dict[str, Any] | None:
         "error": detail,
         "message": (
             f"{detail} Task rejected to prevent execution on an unintended device. "
-            "Run `adb devices -l` to inspect attached hardware, then resubmit with a "
-            "valid serial (or omit device_serial for automatic selection)."
+            f"{inspect_hint}, then resubmit with a "
+            "valid identifier (or omit device_serial for automatic selection)."
         ),
     }
 
@@ -212,8 +218,10 @@ def mobile_run_task(
     device_serial: str | None = None,
     verification_level: str | None = None,
     explorer_mode: str | None = None,
+    platform: str = "android",
+    ios_workspace: str | None = None,
 ) -> dict[str, Any]:
-    """Starts an autonomous mobile UI automation subagent on a connected Android device.
+    """Starts an autonomous mobile UI automation subagent on a connected mobile device.
 
     Delegates a mobile workflow to a background agent. Non-blocking: returns
     immediately with `trace_id` (for `mobile_manage_task` / `mobile_inspect_trace`),
@@ -282,6 +290,17 @@ def mobile_run_task(
     if model.lower() not in ("flash", "pro"):
         raise ValueError(f"Invalid model '{model}'. Must be either 'Flash' or 'Pro'.")
     canonical_model = "Flash" if model.lower() == "flash" else "Pro"
+    # 0a. Validate and normalize platform: 'android' (ADB) or 'ios' (Xcode Simulator).
+    platform = (platform or "android").strip().lower()
+    if platform not in ("android", "ios"):
+        raise ValueError(f"Invalid platform '{platform}'. Must be 'android' or 'ios'.")
+    if platform == "ios" and locked_app_package:
+        return {
+            "trace_id": None,
+            "status": "failed",
+            "error": "locked_app_package is Android-only; iOS tasks cannot lock to an app package.",
+            "message": "Task rejected: 'locked_app_package' requires the Android platform.",
+        }
     # 0b. Validate the Pro tuning knobs before any trace exists so a typo is a
     # plain tool error rather than a failed trace on disk.
     verification_level, explorer_mode = _normalize_pro_tuning(verification_level, explorer_mode)
@@ -303,7 +322,7 @@ def mobile_run_task(
     # different device than the caller asked for. Runs after init_trace so the
     # rejection carries a trace_id like every other response of this tool.
     if device_serial:
-        rejection = _validate_device_serial(device_serial)
+        rejection = _validate_device_serial(device_serial, platform)
         if rejection:
             trace_store.update_trace_status(trace_id, "failed", error=rejection["error"])
             return {"trace_id": trace_id, **rejection}
@@ -325,6 +344,8 @@ def mobile_run_task(
                     conversation_id=conversation_id,
                     verification_level=verification_level,
                     explorer_mode=explorer_mode,
+                    platform=platform,
+                    ios_workspace=ios_workspace,
                     base_url=base_url,
                 )
                 if resp and resp.get("status") == "rejected":
@@ -442,6 +463,10 @@ def mobile_run_task(
     }
     if device_serial:
         reserve_kwargs["device_id"] = device_serial
+    if platform == "ios":
+        # iOS workers queue under the ios__<UDID> scope so they never collide
+        # with an Android device sharing the same textual identifier.
+        reserve_kwargs["lock_scope"] = "ios"
     queue_ticket = DeviceExecutionLock.reserve(**reserve_kwargs)
 
     # 5. Spawn the background task runner as an independent subprocess
@@ -458,6 +483,8 @@ def mobile_run_task(
             canonical_model,
             "--conversation-id",
             conversation_id or "",
+            "--platform",
+            platform,
         ]
         if locked_app_package:
             cmd.extend(["--locked-app-package", locked_app_package])
@@ -467,6 +494,8 @@ def mobile_run_task(
             cmd.extend(["--expected-output-desc", expected_output_desc])
         if device_serial:
             cmd.extend(["--device-serial", device_serial])
+        if platform == "ios" and ios_workspace:
+            cmd.extend(["--ios-workspace", ios_workspace])
         if verification_level:
             cmd.extend(["--verification-level", verification_level])
         if explorer_mode:
@@ -476,8 +505,11 @@ def mobile_run_task(
         env["ARTEMIS_SESSION_ID"] = trace_id
         env["ARTEMIS_TASK_INGRESS"] = "mcp"
         if device_serial:
-            env["ADB_DEVICE_SERIAL"] = device_serial
-            env["ARTEMIS_DEVICE_ID"] = device_serial
+            if platform == "ios":
+                env["ARTEMIS_DEVICE_ID"] = device_serial
+            else:
+                env["ADB_DEVICE_SERIAL"] = device_serial
+                env["ARTEMIS_DEVICE_ID"] = device_serial
         env[DeviceExecutionLock.QUEUE_TICKET_ENV] = queue_ticket
         try:
             ipc_port = read_ipc_port()
@@ -499,6 +531,8 @@ def mobile_run_task(
             "session_id": trace_id,
             "ingress": "mcp",
         }
+        if platform == "ios":
+            transfer_kwargs["lock_scope"] = "ios"
         if device_serial:
             transfer_kwargs["device_id"] = device_serial
 

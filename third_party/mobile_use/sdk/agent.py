@@ -66,6 +66,7 @@ from artemis.data_engine.trace import DataEngineCallbackHandler
 from artemis.graph.graph import get_graph
 from artemis.graph.state import State
 from artemis.runtime import DeviceExecutionLock
+from artemis.runtime.adb_endpoint import IOS_LOCK_SCOPE
 from artemis.sdk.run_outcome import attach_test_summary, resolve_trace_suffix
 from artemis.sdk.types.agent import AgentConfig
 from artemis.utils.startup_progress import publish_startup_progress
@@ -472,7 +473,14 @@ class AgentBase:
                 or getattr(task, "id", None)
                 or getattr(getattr(task, "request", None), "task_name", None)
             )
-            active_owner = DeviceExecutionLock.get_active_owner(self._device_context.device_id)
+            # iOS simulators lock under the "ios" scope so a UDID can never
+            # collide with an Android serial carrying the same text.
+            lock_scope = (
+                IOS_LOCK_SCOPE if context.device.mobile_platform == DevicePlatform.IOS else None
+            )
+            active_owner = DeviceExecutionLock.get_active_owner(
+                self._device_context.device_id, lock_scope=lock_scope
+            )
             already_held = (
                 active_owner is not None
                 and active_owner.pid == os.getpid()
@@ -491,6 +499,7 @@ class AgentBase:
                     max_concurrency=effective_max,
                     session_id=str(sess_id) if sess_id else None,
                     ingress=os.getenv("ARTEMIS_TASK_INGRESS") or "agent",
+                    lock_scope=lock_scope,
                 )
             )
             try:
