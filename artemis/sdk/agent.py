@@ -172,10 +172,9 @@ class Agent(AgentBase):
             device_width=width,
             device_height=height,
         )
-        # Android recording and read-only ADB probes have no iOS equivalent yet.
-        self._config = self._config.model_copy(
-            update={"video_recording_tools_enabled": False, "disable_device_probes": True}
-        )
+        # Android read-only ADB probes have no iOS equivalent yet; native
+        # simctl recording is supported and honors the configured flag.
+        self._config = self._config.model_copy(update={"disable_device_probes": True})
         publish_startup_progress(
             "device_ready", "iOS simulator selected", session_id=self._session_id
         )

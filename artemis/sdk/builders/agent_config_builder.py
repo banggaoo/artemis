@@ -38,6 +38,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
     def __init__(self):
         """Initialize an empty AgentConfigBuilder with Artemis defaults."""
         super().__init__(servers=get_default_servers())
+        self._video_recording_tools_explicit: bool = False
         self._video_recording_tools_enabled: bool = detect_video_tools_enabled()
         self._force_web_accessibility: bool = False
         self._disable_checker: bool = False
@@ -52,9 +53,8 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         self._video_analyzer = agent_cfg.video_analyzer
         self._enable_video_ledger = agent_cfg.video_analyzer.enable_ledger
         if agent_cfg.video_analyzer.enabled is not None:
+            self._video_recording_tools_explicit = True
             self._video_recording_tools_enabled = agent_cfg.video_analyzer.enabled
-        else:
-            self._video_recording_tools_enabled = detect_video_tools_enabled()
         self._disable_planner_validation = not agent_cfg.planner_validation.enabled
         self._enable_committee = agent_cfg.committee.enabled
         self._committee_debate_rounds = agent_cfg.committee.debate_rounds
@@ -109,6 +109,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         Args:
             enabled: Whether to enable video recording tools
         """
+        self._video_recording_tools_explicit = True
         self._video_recording_tools_enabled = enabled
         return self
 
@@ -442,7 +443,15 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
                 or os.environ.get("ARTEMIS_DEVICE_ID")
                 or os.environ.get("ADB_DEVICE_SERIAL")
             ),
-            "video_recording_tools_enabled": self._video_recording_tools_enabled,
+            "video_recording_tools_enabled": (
+                self._video_recording_tools_enabled
+                if self._video_recording_tools_explicit
+                else detect_video_tools_enabled(
+                    self._device_platform.value
+                    if self._device_platform is not None
+                    else DevicePlatform.ANDROID.value
+                )
+            ),
             "force_web_accessibility": self._force_web_accessibility,
             "disable_checker": self._disable_checker,
             "disable_midway_checks": self._disable_midway_checks,

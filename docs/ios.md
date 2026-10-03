@@ -196,8 +196,17 @@ Android shell commands, Logcat, Android resource identifiers, Android package
 discovery, and the Android Accessibility Helper are unavailable on iOS.
 Platform-specific operations fail explicitly when unsupported.
 
-Screen recording, video analysis, and video-based replay are not supported by
-this initial iOS driver. Use screenshots and the task trace to review a run.
+Screen recording uses the native `xcrun simctl io recordVideo` capture with
+no third-party device automation. Each segment is a variable-frame-rate H.264
+`.mov` anchored to its first captured frame; after recording stops (or when a
+rotation or the duration limit rolls a segment), the bundled FFmpeg post-
+processing finalizes a browser-safe 30 fps MP4 and a `recording.json`
+manifest mapping every segment to its session-time offset. The video analyzer
+can clip the sealed portion of an in-progress recording; request ranges that
+reach past the sealed boundary are clipped with a warning. Limitations: iOS
+capture is silent (no audio), pre-first-frame startup time is not captured,
+and recorder restarts leave a brief gap in the timeline rather than stretching
+recorded frames.
 
 ## Troubleshooting
 

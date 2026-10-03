@@ -158,6 +158,7 @@ async def test_sdk_ios_initialization_bypasses_android_and_cleans(native_driver,
         AgentBase, "_init_internal", AsyncMock(side_effect=AssertionError("ADB init"))
     )
     agent = Agent(config=ios_config())
+    configured_video = agent._config.video_recording_tools_enabled
     agent._prewarm_llm_connections = AsyncMock()
     assert await agent.init() is True
     await asyncio.sleep(0)
@@ -166,7 +167,7 @@ async def test_sdk_ios_initialization_bypasses_android_and_cleans(native_driver,
     assert agent._device_context.device_id == native_driver.device_id
     assert (agent._device_context.device_width, agent._device_context.device_height) == (1170, 2532)
     assert agent._adb_client is None and agent._ui_adb_client is None
-    assert agent._config.video_recording_tools_enabled is False
+    assert agent._config.video_recording_tools_enabled == configured_video
     assert agent._config.disable_device_probes is True
     await agent.clean()
     native_driver.disconnect.assert_awaited_once()
@@ -317,7 +318,7 @@ async def test_execute_task_ios_ignores_android_selection(monkeypatch):
     )
     await run_module.execute_task("Open Settings", platform=DevicePlatform.IOS)
     builder.for_device.assert_called_once_with(DevicePlatform.IOS, "booted")
-    builder.with_video_recording_tools.assert_called_once_with(enabled=False)
+    builder.with_video_recording_tools.assert_not_called()
     automation.assert_awaited_once()
 
 
@@ -729,3 +730,102 @@ async def test_context_disconnect_driver_swallows_expected_cleanup_errors(native
     context = ios_context(native_driver)
     with pytest.raises(KeyError):
         await context.disconnect_driver()
+
+
+@pytest.mark.parametrize(
+    "flag", ["--with-video-recording-tools", "--without-video-recording-tools"]
+)
+def test_cli_ios_accepts_video_flag_in_standalone(monkeypatch, flag):
+    execute = AsyncMock()
+    monkeypatch.setattr(run_module, "execute_task", execute)
+    result = CliRunner().invoke(app, ["run", "--platform", "ios", flag, "Open Settings"])
+    assert result.exit_code == 0, result.output
+    execute.assert_awaited_once()
+
+
+def _unconfigured_agent_cfg(monkeypatch, builder_module):
+    """Neutralize any configured video_analyzer.enabled so detection runs."""
+    real_load = builder_module.load_agent_config
+
+    def load():
+        cfg = real_load()
+        cfg.video_analyzer.enabled = None
+        return cfg
+
+    monkeypatch.setattr(builder_module, "load_agent_config", load)
+
+
+def test_builder_auto_detects_video_tools_per_platform(monkeypatch):
+    from artemis.sdk.builders import agent_config_builder as builder_module
+
+    _unconfigured_agent_cfg(monkeypatch, builder_module)
+    observed: list[str] = []
+    monkeypatch.setattr(
+        builder_module,
+        "detect_video_tools_enabled",
+        lambda platform="android": observed.append(platform) or platform == "ios",
+    )
+
+    ios_config = AgentConfigBuilder().for_ios_simulator().build(validate_profiles=False)
+    assert ios_config.video_recording_tools_enabled is True
+    assert observed[-1] == "ios"
+
+    android_config = AgentConfigBuilder().build(validate_profiles=False)
+    assert android_config.video_recording_tools_enabled is False
+    assert observed[-1] == "android"
+
+
+def test_builder_explicit_video_flag_wins_regardless_of_order(monkeypatch):
+    from artemis.sdk.builders import agent_config_builder as builder_module
+
+    monkeypatch.setattr(
+        builder_module,
+        "detect_video_tools_enabled",
+        lambda platform="android": True,
+    )
+
+    before = (
+        AgentConfigBuilder()
+        .with_video_recording_tools(enabled=False)
+        .for_ios_simulator()
+        .build(validate_profiles=False)
+    )
+    after = (
+        AgentConfigBuilder()
+        .for_ios_simulator()
+        .with_video_recording_tools(enabled=False)
+        .build(validate_profiles=False)
+    )
+    enabled = (
+        AgentConfigBuilder()
+        .for_ios_simulator()
+        .with_video_recording_tools(enabled=True)
+        .build(validate_profiles=False)
+    )
+    assert before.video_recording_tools_enabled is False
+    assert after.video_recording_tools_enabled is False
+    assert enabled.video_recording_tools_enabled is True
+
+
+def test_agent_config_default_factory_detects_platform_from_data(monkeypatch):
+    from artemis.sdk.types import agent as agent_types
+
+    monkeypatch.setattr(
+        agent_types,
+        "detect_video_tools_enabled",
+        lambda platform="android": platform == "ios",
+    )
+    from artemis.sdk.types.agent import AgentConfig
+
+    data = AgentConfigBuilder().build(validate_profiles=False).model_dump()
+    data.pop("video_recording_tools_enabled")
+    data["device_platform"] = DevicePlatform.IOS
+    ios = AgentConfig.model_validate(data)
+    data["device_platform"] = DevicePlatform.ANDROID
+    android = AgentConfig.model_validate(data)
+    explicit = AgentConfig.model_validate(
+        {**data, "device_platform": DevicePlatform.IOS, "video_recording_tools_enabled": False}
+    )
+    assert ios.video_recording_tools_enabled is True
+    assert android.video_recording_tools_enabled is False
+    assert explicit.video_recording_tools_enabled is False
