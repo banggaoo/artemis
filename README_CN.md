@@ -106,6 +106,17 @@ cd artemis
 
 > **提示**：启动后将自动在默认浏览器中打开 Web 控制台（`http://localhost:8000`），提供设备连接向导、实时投屏、任务演练与状态回放面板。你也可以通过命令行直接运行：`uv run artemis run "打开系统设置，找到电池选项并告诉我当前电量" --profile flash`。
 
+### iOS 模拟器（macOS，Xcode 27+）
+
+独立 CLI 和嵌入式 Python SDK 可以通过 Xcode 原生 MCP 设备交互工具控制 iOS 模拟器。
+安装要求、Xcode 权限审批和当前限制见 [iOS 使用指南（英文）](./docs/ios.md)：
+
+```bash
+bash scripts/setup_ios_env.sh
+uv run artemis run "打开系统设置并查看通用页面" \
+  --platform ios --standalone --device-serial <SIMULATOR-UDID> --profile flash
+```
+
 <a id="mcp-setup"></a>
 <a id="mcp"></a>
 <details>
@@ -298,7 +309,7 @@ ARTEMIS 提供两种运行模式以适应不同的自动化需求：
 ## 路线图
 
 - [ ] **Android Studio 深度集成**：推出官方 IDE 插件与协同工作流，支持在 Android Studio 内直接进行自动化测试、设备交互与断点调试。
-- [ ] **iOS 跨平台支持**：将视觉感知与自动化执行引擎拓展至 iOS 真机与模拟器。
+- [ ] **iOS 跨平台支持**：[独立模式 iOS 模拟器支持](./docs/ios.md)已支持 Xcode 27+；真机和 Web/Daemon 集成仍在规划中。
 - [ ] **端侧轻量化模型**：支持离线运行的轻量级 Edge VLM，实现低延迟与隐私安全的本地自动化。
 - [ ] **实时语音双工交互**：支持自然语音下发任务与实时打断（Barge-in）控制。
 

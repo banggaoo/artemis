@@ -33,6 +33,16 @@ logger = get_logger(__name__)
 
 def create_driver(ctx: "ArtemisContext") -> BaseDeviceDriver:
     """Instantiates the appropriate BaseDeviceDriver based on the runtime context."""
+    mobile_platform = getattr(ctx.device, "mobile_platform", "android")
+    if mobile_platform == "ios":
+        if os.environ.get("ARTEMIS_CLOUD_MODE") == "1":
+            raise ValueError("iOS Simulator support is local only; cloud mode targets Android.")
+        from artemis.drivers.ios.xcode_driver import XcodeSimulatorDriver
+
+        return XcodeSimulatorDriver(device_id=ctx.device.device_id)
+    if mobile_platform not in {"android", "mock"}:
+        raise ValueError(f"Unsupported mobile platform: {mobile_platform}")
+
     # 1. Cloud mode check. Cloud devices are reached through the gateway's
     # RemoteUIAutomatorClient; ARTEMIS_HIERARCHY_BACKEND does not apply there
     # because the Accessibility Helper needs a local adb forward.

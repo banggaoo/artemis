@@ -203,6 +203,8 @@ def resolve_operator_prompt_tools(ctx: ArtemisContext) -> frozenset[str]:
     # video_recording_tools_enabled); the prompt must not advertise it when the
     # tool is not actually available this run.
     available = set(OPERATOR_PROMPT_TOOLSET)
+    if getattr(getattr(ctx, "device", None), "mobile_platform", None) == "ios":
+        available.difference_update({"run_adb_command", "manage_task", "analyze_task_output"})
     setup = getattr(ctx, "execution_setup", None)
     if not (setup and getattr(setup, "video_recording_tools_enabled", False)):
         available.discard("video_analyzer")
@@ -316,6 +318,9 @@ def render_transcript_static_system(
 
     available = resolve_operator_prompt_tools(ctx)
     static_template = apply_operator_prompt_contract(static_template, available_tools=available)
+    from artemis.agents.platform_guidance import device_action_guidance
+
+    static_template = device_action_guidance(ctx) + static_template
     return Template(static_template).render(
         initial_goal=state.initial_goal,
         subgoals_status="",
@@ -354,6 +359,9 @@ class TemplatePromptComponent(PromptComponent):
         available = resolve_operator_prompt_tools(ctx)
 
         prompt_template = apply_operator_prompt_contract(prompt_template, available_tools=available)
+        from artemis.agents.platform_guidance import device_action_guidance
+
+        prompt_template = device_action_guidance(ctx) + prompt_template
 
         plan_and_history = kwargs.get("plan_and_history", "No plan or history yet.")
 

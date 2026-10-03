@@ -76,6 +76,10 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         """Target a specific Android device by its ADB serial number."""
         return self.for_device(DevicePlatform.ANDROID, device_serial)
 
+    def for_ios_simulator(self, device_id: str = "booted") -> "AgentConfigBuilder":
+        """Target an iOS simulator UDID, or the single booted simulator."""
+        return self.for_device(DevicePlatform.IOS, device_id)
+
     def with_concurrency_mode(self, mode: str) -> "AgentConfigBuilder":
         """Configure concurrency mode: 'global' (1 task globally) or 'per_device' (1 task per device)."""
         self._concurrency_mode = str(mode).strip().lower()

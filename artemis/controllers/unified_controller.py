@@ -56,6 +56,21 @@ class UnifiedMobileController(UnifiedMobileControllerBase):
         super().__init__(ctx, get_driver(ctx))
         self._segment_cache: dict[tuple[str, int, float, float], VideoRecordingResult] = {}
 
+    async def open_url(self, url: str) -> bool:
+        if self.ctx.device.mobile_platform == "ios":
+            return await self._driver.open_url(url)
+        return await super().open_url(url)
+
+    async def erase_text(self, nb_chars: int | None = None) -> bool:
+        if self.ctx.device.mobile_platform == "ios":
+            if nb_chars is not None and nb_chars > 0:
+                for _ in range(nb_chars):
+                    if not await self._driver.press_key("delete"):
+                        return False
+                return True
+            return await self._driver.input_text("", clear_existing=True)
+        return await super().erase_text(nb_chars)
+
     @staticmethod
     async def _spawn_scrcpy(command: list[str]) -> asyncio.subprocess.Process:
         kwargs: dict[str, Any] = {
@@ -399,6 +414,11 @@ class UnifiedMobileController(UnifiedMobileControllerBase):
     ) -> VideoRecordingResult:
         """Start screen recording on Android device using scrcpy."""
         self._segment_cache.clear()
+        if self.ctx.device.mobile_platform == "ios":
+            return VideoRecordingResult(
+                success=False,
+                message="iOS video analysis is not supported by the recording controller.",
+            )
         device_id = self._get_device_id()
 
         # Check mock driver first
@@ -519,6 +539,10 @@ class UnifiedMobileController(UnifiedMobileControllerBase):
     async def stop_video_recording(self) -> VideoRecordingResult:
         """Stop scrcpy recording and return the converted MP4 video file."""
         self._segment_cache.clear()
+        if self.ctx.device.mobile_platform == "ios":
+            return VideoRecordingResult(
+                success=False, message="No iOS controller recording is active."
+            )
         device_id = self._get_device_id()
 
         # Check mock driver first
