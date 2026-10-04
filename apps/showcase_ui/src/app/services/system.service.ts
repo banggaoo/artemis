@@ -534,13 +534,23 @@ export class SystemService {
    * Select a specific connected device or iOS simulator as active target
    */
   public selectDevice(serial: string, platform: 'android' | 'ios' = 'android'): Observable<any> {
+    // iOS selection is client-side state (the run payload carries the binding);
+    // apply it optimistically since UDID validation can take seconds and the
+    // error path below reverts it if the server rejects the pick.
+    if (platform === 'ios') {
+      const dev = this.connectedDevices().find(d => d.serial === serial) ?? null;
+      this.selectedIosDevice.set(dev);
+    }
     this.isLoading.set(true);
     return this.http.post<any>('/api/system/devices/select', { serial, platform }).pipe(
       tap({
         next: (res) => {
-          if (platform === 'ios' && res?.status === 'success') {
-            const dev = this.connectedDevices().find(d => d.serial === serial) ?? null;
-            this.selectedIosDevice.set(dev);
+          if (platform === 'ios') {
+            this.selectedIosDevice.set(
+              res?.status === 'success'
+                ? this.connectedDevices().find(d => d.serial === serial) ?? this.selectedIosDevice()
+                : null
+            );
           } else if (platform === 'android') {
             this.selectedIosDevice.set(null);
           }
