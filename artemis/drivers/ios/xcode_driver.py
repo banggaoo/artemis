@@ -26,7 +26,11 @@ from PIL import Image
 
 from artemis.drivers.base import BaseDeviceDriver, KeyCode, ScreenData, SwipeDirection
 from artemis.drivers.ios.bridge import XcodeApprovalRequiredError, XcodeBridge
-from artemis.drivers.ios.discovery import parse_simctl_devices, run_xcrun
+from artemis.drivers.ios.discovery import (
+    clear_ios_simulator_cache,
+    parse_simctl_devices,
+    run_xcrun,
+)
 from artemis.drivers.ios.hierarchy import application_bundle, parse_hierarchy
 from artemis.drivers.ios.recording import IosRecordingSession, IosScreenRecorder
 from third_party.mobile_use.controllers.types import ElementQuery
@@ -125,6 +129,7 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
             candidate = await self._resolve_device()
             if candidate.get("state") == "Shutdown":
                 await run_xcrun("simctl", "boot", self._device_id)
+                clear_ios_simulator_cache()
             await run_xcrun("simctl", "bootstatus", self._device_id, "-b", timeout=180.0)
             await self._bridge.start()
             required = {

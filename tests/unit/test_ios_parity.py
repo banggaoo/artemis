@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 
 from artemis.drivers.ios.discovery import (
+    clear_ios_simulator_cache,
     list_ios_simulators,
     list_ios_simulators_sync,
     parse_simctl_devices,
@@ -40,6 +41,13 @@ def isolated_lock_directory(tmp_path, monkeypatch):
         "artemis.runtime.device_lock.get_temp_dir",
         lambda _name: tmp_path,
     )
+
+
+@pytest.fixture(autouse=True)
+def fresh_simulator_enumeration():
+    clear_ios_simulator_cache()
+    yield
+    clear_ios_simulator_cache()
 
 
 SIMCTL_PAYLOAD = {
@@ -144,6 +152,63 @@ def test_list_ios_simulators_sync_parses_json(monkeypatch):
     monkeypatch.setattr("artemis.drivers.ios.discovery.subprocess.run", lambda *a, **k: completed)
     devices = list_ios_simulators_sync()
     assert {d["udid"] for d in devices} == {"AAAA-1111", "BBBB-2222"}
+
+
+@pytest.mark.asyncio
+async def test_list_ios_simulators_reuses_cached_enumeration(monkeypatch):
+    import json
+
+    run_xcrun = AsyncMock(return_value=json.dumps(SIMCTL_PAYLOAD).encode())
+    monkeypatch.setattr("artemis.drivers.ios.discovery.run_xcrun", run_xcrun)
+    monkeypatch.setattr("artemis.drivers.ios.discovery.simctl_available", lambda: True)
+    assert await list_ios_simulators() is not None
+    assert await list_ios_simulators() is not None
+    # Second call inside the TTL serves the cache — no second simctl spawn.
+    assert run_xcrun.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_list_ios_simulators_does_not_cache_failures(monkeypatch):
+    import json
+
+    run_xcrun = AsyncMock(
+        side_effect=[RuntimeError("cold simctl"), json.dumps(SIMCTL_PAYLOAD).encode()]
+    )
+    monkeypatch.setattr("artemis.drivers.ios.discovery.run_xcrun", run_xcrun)
+    monkeypatch.setattr("artemis.drivers.ios.discovery.simctl_available", lambda: True)
+    assert await list_ios_simulators() is None
+    assert await list_ios_simulators() is not None
+    assert run_xcrun.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_list_ios_simulators_force_refresh_bypasses_cache(monkeypatch):
+    import json
+
+    run_xcrun = AsyncMock(return_value=json.dumps(SIMCTL_PAYLOAD).encode())
+    monkeypatch.setattr("artemis.drivers.ios.discovery.run_xcrun", run_xcrun)
+    monkeypatch.setattr("artemis.drivers.ios.discovery.simctl_available", lambda: True)
+    await list_ios_simulators()
+    await list_ios_simulators(force_refresh=True)
+    assert run_xcrun.await_count == 2
+
+
+def test_list_ios_simulators_sync_shares_cache(monkeypatch):
+    import json
+    import subprocess
+
+    completed = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=json.dumps(SIMCTL_PAYLOAD).encode()
+    )
+    calls = []
+    monkeypatch.setattr("artemis.drivers.ios.discovery.simctl_available", lambda: True)
+    monkeypatch.setattr(
+        "artemis.drivers.ios.discovery.subprocess.run",
+        lambda *a, **k: calls.append(1) or completed,
+    )
+    assert list_ios_simulators_sync() is not None
+    assert list_ios_simulators_sync() is not None
+    assert len(calls) == 1
 
 
 # --------------------------------------------------------------------------- #
