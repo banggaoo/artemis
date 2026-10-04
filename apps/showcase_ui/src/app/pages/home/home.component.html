@@ -1760,7 +1760,7 @@
             <span>
               {{ adbProbe()?.summary === 'Device Locked'
                 ? 'Android device is locked. Unlock it and enter the home screen before running a task.'
-                : 'Prerequisites incomplete: runtime, credentials, or Android device is not ready. Click here to open Setup Guide.' }}
+                : 'Prerequisites incomplete: runtime, credentials, or device is not ready. Click here to open Setup Guide.' }}
             </span>
             <span class="material-symbols-outlined arrow">arrow_forward</span>
           </div>
@@ -1856,6 +1856,23 @@
                   <span class="btn-text">Pro</span>
                 </button>
               </div>
+
+              <!-- Run target indicator (selected in System Setup) -->
+              @if (selectedTarget(); as tgt) {
+                <button
+                  type="button"
+                  class="target-device-chip"
+                  [class.is-ios]="tgt.platform === 'ios'"
+                  (click)="setTab('diagnostics')"
+                  [title]="'Run target: ' + (tgt.model || tgt.serial) + ' — click to change'"
+                >
+                  <span class="material-symbols-outlined target-icon">
+                    {{ tgt.platform === 'ios' ? 'phone_iphone' : 'phone_android' }}
+                  </span>
+                  <span class="target-name">{{ tgt.model || tgt.serial }}</span>
+                  <span class="target-plat">{{ tgt.platform === 'ios' ? 'iOS' : 'Android' }}</span>
+                </button>
+              }
             </div>
 
             <div class="bar-right">
