@@ -2410,8 +2410,84 @@ $text-light: #94a3b8;
         display: flex;
         flex-direction: column;
         gap: 12px;
+      }
 
-        .ios-sim-panel {
+      .platform-tabs {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        align-self: flex-start;
+        background: rgba(241, 245, 249, 0.85);
+        padding: 3px;
+        border-radius: 10px;
+        margin-bottom: 12px;
+
+        .platform-tab {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          height: 28px;
+          padding: 0 12px;
+          border: none;
+          border-radius: 8px;
+          background: transparent;
+          font-family: inherit;
+          font-size: 12px;
+          font-weight: 600;
+          color: $text-muted;
+          cursor: pointer;
+          transition: all 0.15s ease;
+
+          .plat-icon {
+            font-size: 15px;
+          }
+
+          .plat-count {
+            font-size: 10px;
+            font-weight: 700;
+            padding: 1px 6px;
+            border-radius: 8px;
+            background: rgba(100, 116, 139, 0.12);
+            color: inherit;
+          }
+
+          &.active {
+            background: #ffffff;
+            color: $text-main;
+            box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+          }
+        }
+      }
+
+      .ios-empty-state {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 16px;
+        border: 1px dashed $card-border-hover;
+        border-radius: 8px;
+        background: #fafbff;
+
+        .ios-empty-icon {
+          font-size: 22px;
+          color: #818cf8;
+        }
+
+        .ios-empty-title {
+          font-size: 12.5px;
+          font-weight: 700;
+          color: $text-main;
+          margin-bottom: 3px;
+        }
+
+        .ios-empty-desc {
+          font-size: 11.5px;
+          color: $text-secondary;
+          line-height: 1.5;
+        }
+      }
+
+      .ios-sim-panel {
           display: flex;
           flex-direction: column;
           gap: 10px;
@@ -5096,7 +5172,6 @@ $text-light: #94a3b8;
     }
 
   }
-}
 
 // =============================================================================
 // KEYFRAME ANIMATIONS
