@@ -714,26 +714,32 @@
                 <div class="device-hero-card">
                   <div class="device-avatar">
                     <span class="material-symbols-outlined device-hero-icon">
-                      phone_android
+                      {{ selectedTarget()?.platform === 'ios' ? 'phone_iphone' : 'phone_android' }}
                     </span>
                   </div>
                   <div class="device-hero-details">
                     <div class="device-hero-name">
-                      {{ activeDevice()?.model || activeDevice()?.serial }}
+                      {{ selectedTarget()?.model || selectedTarget()?.serial }}
                     </div>
                     <div class="device-hero-meta">
-                      @if (activeDevice()?.is_emulator) {
+                      @if (selectedTarget()?.platform === 'ios') {
+                        <span>iOS Simulator</span>
+                        <span class="meta-dot">·</span>
+                      } @else if (selectedTarget()?.is_emulator) {
                         <span>Virtual Device</span>
                         <span class="meta-dot">·</span>
                       }
-                      <span>{{ activeDevice()?.serial }}</span>
-                      @if (activeDevice()?.screen_resolution) {
+                      <span>{{ selectedTarget()?.serial }}</span>
+                      @if (selectedTarget()?.screen_resolution) {
                         <span class="meta-dot">·</span>
-                        <span>{{ activeDevice()?.screen_resolution }}</span>
+                        <span>{{ selectedTarget()?.screen_resolution }}</span>
                       }
-                      @if (activeDevice()?.android_version) {
+                      @if (selectedTarget()?.platform === 'ios' && selectedTarget()?.product) {
                         <span class="meta-dot">·</span>
-                        <span>Android {{ activeDevice()?.android_version }}</span>
+                        <span>{{ selectedTarget()?.product }}</span>
+                      } @else if (selectedTarget()?.android_version) {
+                        <span class="meta-dot">·</span>
+                        <span>Android {{ selectedTarget()?.android_version }}</span>
                       }
                       @if (isRemoteAdbServer()) {
                         <span class="meta-dot">·</span>
@@ -758,14 +764,17 @@
                         <button
                           type="button"
                           class="device-chip-btn"
-                          [class.selected]="dev.serial === activeDevice()?.serial"
-                          (click)="selectTargetDevice(dev.serial)"
+                          [class.selected]="dev.serial === selectedDeviceSerial()"
+                          (click)="selectTargetDevice(dev)"
                         >
                           <span class="material-symbols-outlined chip-icon">
-                            phone_android
+                            {{ dev.platform === 'ios' ? 'phone_iphone' : 'phone_android' }}
                           </span>
                           <span>{{ dev.model || dev.serial }}</span>
-                          @if (dev.serial === activeDevice()?.serial) {
+                          @if (dev.platform === 'ios') {
+                            <span class="ios-badge">iOS</span>
+                          }
+                          @if (dev.serial === selectedDeviceSerial()) {
                             <span class="active-check">✓ Active</span>
                           }
                         </button>
@@ -1569,14 +1578,17 @@
                         <button
                           type="button"
                           class="device-chip-btn"
-                          [class.selected]="dev.serial === activeDevice()?.serial"
-                          (click)="selectTargetDevice(dev.serial)"
+                          [class.selected]="dev.serial === selectedDeviceSerial()"
+                          (click)="selectTargetDevice(dev)"
                         >
                           <span class="material-symbols-outlined chip-icon">
-                            phone_android
+                            {{ dev.platform === 'ios' ? 'phone_iphone' : 'phone_android' }}
                           </span>
                           <span>{{ dev.model || dev.serial }}</span>
-                          @if (dev.serial === activeDevice()?.serial) {
+                          @if (dev.platform === 'ios') {
+                            <span class="ios-badge">iOS</span>
+                          }
+                          @if (dev.serial === selectedDeviceSerial()) {
                             <span class="active-check">✓ Active</span>
                           }
                         </button>
