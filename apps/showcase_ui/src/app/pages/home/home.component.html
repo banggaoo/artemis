@@ -672,9 +672,9 @@
             </div>
             <div class="step-info">
               <div class="step-title-row">
-                <h3 class="step-title">Android Device & Emulator Connection</h3>
+                <h3 class="step-title">Device & Emulator Connection</h3>
               </div>
-              <p class="step-desc">Local emulator, attached phone, wireless device, or another ADB server</p>
+              <p class="step-desc">Android device or emulator via ADB, or an iOS Simulator (Xcode 27+)</p>
             </div>
 
             <button
@@ -963,6 +963,42 @@
             <!-- STATE B-3: NO DEVICE DETECTED / READY TO CONNECT GUIDE -->
             @if (showConnectionMethods() || (!isDeviceReady() && !isEmulatorLaunching() && adbProbe()?.summary !== 'Device Booting' && adbProbe()?.summary !== 'Device Unauthorized' && adbProbe()?.summary !== 'Device Locked' && adbProbe()?.summary !== 'Lock State Unknown' && adbProbe()?.status !== 'fail' && emulatorLaunchState()?.status !== 'failed')) {
               <div class="foolproof-guide-container">
+                <!-- iOS Simulators (Xcode 27+) — independent of ADB state -->
+                @if (iosDevices().length > 0) {
+                  <div class="ios-sim-panel">
+                    <div class="ios-sim-header">
+                      <span class="material-symbols-outlined ios-sim-icon">phone_iphone</span>
+                      <div class="ios-sim-header-text">
+                        <span class="ios-sim-title">iOS Simulators</span>
+                        <span class="ios-sim-desc">
+                          {{ iosDevices().length }} available — select one to run iOS tasks
+                        </span>
+                      </div>
+                    </div>
+                    <div class="multi-device-switcher switcher-chips">
+                      @for (dev of iosDevices(); track dev.serial) {
+                        <button
+                          type="button"
+                          class="device-chip-btn"
+                          [class.selected]="dev.serial === selectedDeviceSerial()"
+                          (click)="selectTargetDevice(dev)"
+                        >
+                          <span class="material-symbols-outlined chip-icon">
+                            phone_iphone
+                          </span>
+                          <span>{{ dev.model || dev.serial }}</span>
+                          @if (dev.state !== 'device') {
+                            <span class="sim-state">({{ dev.state }})</span>
+                          }
+                          <span class="ios-badge">iOS</span>
+                          @if (dev.serial === selectedDeviceSerial()) {
+                            <span class="active-check">✓ Active</span>
+                          }
+                        </button>
+                      }
+                    </div>
+                  </div>
+                }
                 <!-- Method Selection Nav Cards -->
                 <div class="connection-methods-nav">
                   <button
