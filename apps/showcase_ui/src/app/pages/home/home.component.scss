@@ -1811,6 +1811,16 @@ $text-light: #94a3b8;
                 font-size: 14px;
               }
 
+              .ios-badge {
+                font-size: 9px;
+                font-weight: 700;
+                padding: 1px 5px;
+                border-radius: 4px;
+                background: #eef2ff;
+                color: #4f46e5;
+                letter-spacing: 0.3px;
+              }
+
               .active-check {
                 color: $emerald;
                 font-size: 10.5px;

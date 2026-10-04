@@ -20,7 +20,7 @@ enumeration is stubbed at the discovery boundary.
 
 import asyncio
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -725,3 +725,80 @@ def test_ios_probe_registered_in_engine():
 
     assert "ios_simulators" in readiness_engine._probes
     assert readiness_engine._probes["ios_simulators"].is_blocker is False
+
+
+# --------------------------------------------------------------------------- #
+# web: platform-aware device selection
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_select_device_ios_validates_udid_and_skips_adb_target(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from apps.admin_console.routers import system as system_router
+    from apps.admin_console.routers.system import SelectDeviceRequest
+
+    validate = AsyncMock(return_value=None)
+    monkeypatch.setattr(IosDevicePool, "validate_explicit_serial_async", validate)
+    set_target = Mock()
+    monkeypatch.setattr(system_router.readiness_engine, "set_probe_target_serial", set_target)
+
+    result = await system_router.select_active_device(
+        SelectDeviceRequest(serial="AAAA-1111", platform="ios")
+    )
+
+    assert result["status"] == "success"
+    assert result["selected_serial"] == "AAAA-1111"
+    assert result["platform"] == "ios"
+    validate.assert_awaited_once_with("AAAA-1111")
+    set_target.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_select_device_ios_rejects_unknown_udid(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+
+    from apps.admin_console.routers.system import SelectDeviceRequest, select_active_device
+
+    monkeypatch.setattr(
+        IosDevicePool,
+        "validate_explicit_serial_async",
+        AsyncMock(return_value="iOS Simulator UDID 'NOPE' was not found."),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await select_active_device(SelectDeviceRequest(serial="NOPE", platform="ios"))
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_select_device_rejects_unknown_platform():
+    from fastapi import HTTPException
+
+    from apps.admin_console.routers.system import SelectDeviceRequest, select_active_device
+
+    with pytest.raises(HTTPException) as exc_info:
+        await select_active_device(SelectDeviceRequest(serial="dev-1", platform="tvos"))
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_select_device_android_unchanged(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from apps.admin_console.routers import system as system_router
+    from apps.admin_console.routers.system import SelectDeviceRequest
+
+    set_target = Mock()
+    report = object()
+    monkeypatch.setattr(system_router.readiness_engine, "set_probe_target_serial", set_target)
+    monkeypatch.setattr(system_router.readiness_engine, "run_all", AsyncMock(return_value=report))
+
+    result = await system_router.select_active_device(SelectDeviceRequest(serial="emulator-5554"))
+
+    assert result["status"] == "success"
+    assert result["selected_serial"] == "emulator-5554"
+    set_target.assert_called_once_with("emulator-5554")
