@@ -58,6 +58,11 @@ class LLM(BaseModel):
     provider: LLMProvider
     model: str
     temperature: float | None = None
+    api_base: str | None = None
+    max_tokens: int | None = None
+    coordinate_format: (
+        Literal["yx_1000", "xy_1000", "yx_px", "xy_px", "yx_norm", "xy_norm"] | None
+    ) = None
     thinking_budget: int | None = None
     thinking_level: Literal["minimal", "low", "medium", "high"] | None = None
     reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
