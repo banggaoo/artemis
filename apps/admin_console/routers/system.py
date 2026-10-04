@@ -93,9 +93,13 @@ def _require_local_lifecycle_request(request: Request) -> None:
 
 
 class SelectDeviceRequest(BaseModel):
-    """Payload to select an active target Android device."""
+    """Payload to select an active target device."""
 
-    serial: str = Field(description="Serial number or identifier of the Android device to select")
+    serial: str = Field(description="Serial number or identifier of the device to select")
+    platform: str = Field(
+        default="android",
+        description="Device platform: 'android' (default) or 'ios' (simulator UDID)",
+    )
 
 
 @router.get("/readiness", response_model=SystemReadinessReport)
@@ -106,10 +110,26 @@ async def get_system_readiness(force: bool = False) -> SystemReadinessReport:
 
 @router.post("/devices/select")
 async def select_active_device(request: SelectDeviceRequest):
-    """Select the active Android device or emulator for subsequent automated tasks."""
+    """Select the active device or iOS simulator for subsequent automated tasks."""
     serial = request.serial.strip()
     if not serial:
         raise HTTPException(status_code=400, detail="Device serial cannot be empty.")
+
+    platform = (request.platform or "android").strip().lower()
+    if platform == "ios":
+        # iOS has no ADB probe to retarget; validate the UDID and let the
+        # task payload's device_serial + platform carry the binding.
+        from artemis.runtime import ios_device_pool
+
+        rejection = await ios_device_pool.validate_explicit_serial_async(serial)
+        if rejection:
+            raise HTTPException(status_code=400, detail=rejection)
+        return {"status": "success", "selected_serial": serial, "platform": "ios"}
+    if platform != "android":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported platform '{request.platform}'. Expected 'android' or 'ios'.",
+        )
 
     readiness_engine.set_probe_target_serial(serial)
     # Return updated readiness
