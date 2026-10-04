@@ -677,6 +677,7 @@
               <p class="step-desc">Android device or emulator via ADB, or an iOS Simulator (Xcode 27+)</p>
             </div>
 
+            @if (deviceGuidePlatform() === 'android') {
             <button
               type="button"
               class="btn-restart-adb btn-connection-options"
@@ -704,42 +705,67 @@
               <span>{{ isRemoteAdbServer() ? 'Refresh Devices' : 'Restart ADB' }}</span>
               }
             </button>
+            }
           </div>
 
           <div class="guide-card-body">
 
+            <!-- Platform split: Android (ADB) vs iOS Simulator -->
+            <div class="platform-tabs">
+              <button
+                type="button"
+                class="platform-tab"
+                [class.active]="deviceGuidePlatform() === 'android'"
+                (click)="deviceGuidePlatform.set('android')"
+              >
+                <span class="material-symbols-outlined plat-icon">android</span>
+                <span>Android</span>
+                @if (androidDevices().length > 0) {
+                  <span class="plat-count">{{ androidDevices().length }}</span>
+                }
+              </button>
+              <button
+                type="button"
+                class="platform-tab"
+                [class.active]="deviceGuidePlatform() === 'ios'"
+                (click)="deviceGuidePlatform.set('ios')"
+              >
+                <span class="material-symbols-outlined plat-icon">phone_iphone</span>
+                <span>iOS Simulator</span>
+                @if (iosDevices().length > 0) {
+                  <span class="plat-count">{{ iosDevices().length }}</span>
+                }
+              </button>
+            </div>
+
+            @if (deviceGuidePlatform() === 'android') {
+
             <!-- STATE A: CONNECTED & READY -->
-            @if (isDeviceReady()) {
+            @if (androidDeviceReady()) {
               <div class="connected-device-panel">
                 <div class="device-hero-card">
                   <div class="device-avatar">
                     <span class="material-symbols-outlined device-hero-icon">
-                      {{ selectedTarget()?.platform === 'ios' ? 'phone_iphone' : 'phone_android' }}
+                      phone_android
                     </span>
                   </div>
                   <div class="device-hero-details">
                     <div class="device-hero-name">
-                      {{ selectedTarget()?.model || selectedTarget()?.serial }}
+                      {{ activeDevice()?.model || activeDevice()?.serial }}
                     </div>
                     <div class="device-hero-meta">
-                      @if (selectedTarget()?.platform === 'ios') {
-                        <span>iOS Simulator</span>
-                        <span class="meta-dot">·</span>
-                      } @else if (selectedTarget()?.is_emulator) {
+                      @if (activeDevice()?.is_emulator) {
                         <span>Virtual Device</span>
                         <span class="meta-dot">·</span>
                       }
-                      <span>{{ selectedTarget()?.serial }}</span>
-                      @if (selectedTarget()?.screen_resolution) {
+                      <span>{{ activeDevice()?.serial }}</span>
+                      @if (activeDevice()?.screen_resolution) {
                         <span class="meta-dot">·</span>
-                        <span>{{ selectedTarget()?.screen_resolution }}</span>
+                        <span>{{ activeDevice()?.screen_resolution }}</span>
                       }
-                      @if (selectedTarget()?.platform === 'ios' && selectedTarget()?.product) {
+                      @if (activeDevice()?.android_version) {
                         <span class="meta-dot">·</span>
-                        <span>{{ selectedTarget()?.product }}</span>
-                      } @else if (selectedTarget()?.android_version) {
-                        <span class="meta-dot">·</span>
-                        <span>Android {{ selectedTarget()?.android_version }}</span>
+                        <span>Android {{ activeDevice()?.android_version }}</span>
                       }
                       @if (isRemoteAdbServer()) {
                         <span class="meta-dot">·</span>
@@ -756,11 +782,11 @@
                 </div>
 
                 <!-- Multi-Device Switcher if multiple devices detected -->
-                @if (connectedDevices().length > 1) {
+                @if (androidDevices().length > 1) {
                   <div class="multi-device-switcher">
                     <span class="switcher-label">Select Active Device:</span>
                     <div class="switcher-chips">
-                      @for (dev of connectedDevices(); track dev.serial) {
+                      @for (dev of androidDevices(); track dev.serial) {
                         <button
                           type="button"
                           class="device-chip-btn"
@@ -768,12 +794,9 @@
                           (click)="selectTargetDevice(dev)"
                         >
                           <span class="material-symbols-outlined chip-icon">
-                            {{ dev.platform === 'ios' ? 'phone_iphone' : 'phone_android' }}
+                            phone_android
                           </span>
                           <span>{{ dev.model || dev.serial }}</span>
-                          @if (dev.platform === 'ios') {
-                            <span class="ios-badge">iOS</span>
-                          }
                           @if (dev.serial === selectedDeviceSerial()) {
                             <span class="active-check">✓ Active</span>
                           }
@@ -786,7 +809,7 @@
             }
 
             <!-- STATE B-1: EMULATOR LAUNCHING / DEVICE BOOTING LIVE TRACKER -->
-            @if (isEmulatorLaunching() || (!isDeviceReady() && adbProbe()?.summary === 'Device Booting')) {
+            @if (isEmulatorLaunching() || (!androidDeviceReady() && adbProbe()?.summary === 'Device Booting')) {
               <div class="emulator-boot-tracker-container">
                 <div class="emulator-boot-tracker-card">
                   <div class="tracker-header">
@@ -963,42 +986,6 @@
             <!-- STATE B-3: NO DEVICE DETECTED / READY TO CONNECT GUIDE -->
             @if (showConnectionMethods() || (!isDeviceReady() && !isEmulatorLaunching() && adbProbe()?.summary !== 'Device Booting' && adbProbe()?.summary !== 'Device Unauthorized' && adbProbe()?.summary !== 'Device Locked' && adbProbe()?.summary !== 'Lock State Unknown' && adbProbe()?.status !== 'fail' && emulatorLaunchState()?.status !== 'failed')) {
               <div class="foolproof-guide-container">
-                <!-- iOS Simulators (Xcode 27+) — independent of ADB state -->
-                @if (iosDevices().length > 0) {
-                  <div class="ios-sim-panel">
-                    <div class="ios-sim-header">
-                      <span class="material-symbols-outlined ios-sim-icon">phone_iphone</span>
-                      <div class="ios-sim-header-text">
-                        <span class="ios-sim-title">iOS Simulators</span>
-                        <span class="ios-sim-desc">
-                          {{ iosDevices().length }} available — select one to run iOS tasks
-                        </span>
-                      </div>
-                    </div>
-                    <div class="multi-device-switcher switcher-chips">
-                      @for (dev of iosDevices(); track dev.serial) {
-                        <button
-                          type="button"
-                          class="device-chip-btn"
-                          [class.selected]="dev.serial === selectedDeviceSerial()"
-                          (click)="selectTargetDevice(dev)"
-                        >
-                          <span class="material-symbols-outlined chip-icon">
-                            phone_iphone
-                          </span>
-                          <span>{{ dev.model || dev.serial }}</span>
-                          @if (dev.state !== 'device') {
-                            <span class="sim-state">({{ dev.state }})</span>
-                          }
-                          <span class="ios-badge">iOS</span>
-                          @if (dev.serial === selectedDeviceSerial()) {
-                            <span class="active-check">✓ Active</span>
-                          }
-                        </button>
-                      }
-                    </div>
-                  </div>
-                }
                 <!-- Method Selection Nav Cards -->
                 <div class="connection-methods-nav">
                   <button
@@ -1606,11 +1593,11 @@
                 </div>
 
                 <!-- Multi-Device Switcher if multiple devices detected -->
-                @if (connectedDevices().length > 1) {
+                @if (androidDevices().length > 1) {
                   <div class="multi-device-switcher" style="margin-top: 12px;">
                     <span class="switcher-label">Select Active Device:</span>
                     <div class="switcher-chips">
-                      @for (dev of connectedDevices(); track dev.serial) {
+                      @for (dev of androidDevices(); track dev.serial) {
                         <button
                           type="button"
                           class="device-chip-btn"
@@ -1618,12 +1605,9 @@
                           (click)="selectTargetDevice(dev)"
                         >
                           <span class="material-symbols-outlined chip-icon">
-                            {{ dev.platform === 'ios' ? 'phone_iphone' : 'phone_android' }}
+                            phone_android
                           </span>
                           <span>{{ dev.model || dev.serial }}</span>
-                          @if (dev.platform === 'ios') {
-                            <span class="ios-badge">iOS</span>
-                          }
                           @if (dev.serial === selectedDeviceSerial()) {
                             <span class="active-check">✓ Active</span>
                           }
@@ -1722,6 +1706,93 @@
               </div>
             }
 
+            } @else {
+
+            <!-- iOS TAB: SIMULATORS VIA XCODE 27+ -->
+            <div class="ios-device-panel">
+
+              <!-- Selected simulator hero -->
+              @if (selectedIosDevice(); as sim) {
+                <div class="connected-device-panel">
+                  <div class="device-hero-card">
+                    <div class="device-avatar">
+                      <span class="material-symbols-outlined device-hero-icon">
+                        phone_iphone
+                      </span>
+                    </div>
+                    <div class="device-hero-details">
+                      <div class="device-hero-name">
+                        {{ sim.model || sim.serial }}
+                      </div>
+                      <div class="device-hero-meta">
+                        <span>iOS Simulator</span>
+                        <span class="meta-dot">·</span>
+                        <span>{{ sim.serial }}</span>
+                        @if (sim.product) {
+                          <span class="meta-dot">·</span>
+                          <span>{{ sim.product }}</span>
+                        }
+                      </div>
+                    </div>
+                    <div class="device-hero-status">
+                      <span class="status-dot dot-pass"></span>
+                      <span class="status-text">Connected</span>
+                    </div>
+                  </div>
+                </div>
+              }
+
+              <!-- Simulator picker -->
+              @if (iosDevices().length > 0) {
+                <div class="ios-sim-panel">
+                  <div class="ios-sim-header">
+                    <span class="material-symbols-outlined ios-sim-icon">phone_iphone</span>
+                    <div class="ios-sim-header-text">
+                      <span class="ios-sim-title">iOS Simulators</span>
+                      <span class="ios-sim-desc">
+                        {{ iosDevices().length }} available — select one to run iOS tasks
+                      </span>
+                    </div>
+                  </div>
+                  <div class="multi-device-switcher switcher-chips">
+                    @for (dev of iosDevices(); track dev.serial) {
+                      <button
+                        type="button"
+                        class="device-chip-btn"
+                        [class.selected]="dev.serial === selectedDeviceSerial()"
+                        (click)="selectTargetDevice(dev)"
+                      >
+                        <span class="material-symbols-outlined chip-icon">
+                          phone_iphone
+                        </span>
+                        <span>{{ dev.model || dev.serial }}</span>
+                        @if (dev.state !== 'device') {
+                          <span class="sim-state">({{ dev.state }})</span>
+                        }
+                        <span class="ios-badge">iOS</span>
+                        @if (dev.serial === selectedDeviceSerial()) {
+                          <span class="active-check">✓ Active</span>
+                        }
+                      </button>
+                    }
+                  </div>
+                </div>
+              } @else {
+                <div class="ios-empty-state">
+                  <span class="material-symbols-outlined ios-empty-icon">phone_iphone</span>
+                  <div class="ios-empty-text">
+                    <div class="ios-empty-title">No iOS Simulators Available</div>
+                    <div class="ios-empty-desc">
+                      {{ iosProbe()?.description || 'iOS Simulator automation requires macOS with Xcode 27+ and at least one available simulator.' }}
+                    </div>
+                  </div>
+                </div>
+              }
+
+            </div>
+
+            }
+
           </div>
         </div>
 
@@ -1734,7 +1805,7 @@
               </div>
               <div class="ready-text-group">
                 <h4 class="ready-title">System Ready for Autonomous Tasks</h4>
-                <p class="ready-desc">All dependencies, AI model credentials, and Android device are verified and ready to run.</p>
+                <p class="ready-desc">All dependencies, AI model credentials, and a target device are verified and ready to run.</p>
               </div>
             </div>
             <button type="button" class="btn-proceed-launch" (click)="setTab('launcher')">
