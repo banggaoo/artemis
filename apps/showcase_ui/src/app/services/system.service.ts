@@ -155,6 +155,10 @@ export class SystemService {
     return devices;
   });
 
+  public iosDevices = computed<DeviceInfo[]>(
+    () => this.connectedDevices().filter(d => d.platform === 'ios')
+  );
+
   // iOS selection lives client-side: iOS has no ADB probe to retarget, so
   // the chosen simulator is carried in the run payload instead.
   public selectedIosDevice = signal<DeviceInfo | null>(null);
