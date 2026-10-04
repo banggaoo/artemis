@@ -56,6 +56,7 @@ export class SystemService {
   public configProbe = computed(() => this.probes().find(p => p.id === 'system_config') || null);
   public toolchainProbe = computed(() => this.probes().find(p => p.id === 'toolchain') || null);
   public adbProbe = computed(() => this.probes().find(p => p.id === 'android_adb') || null);
+  public iosProbe = computed(() => this.probes().find(p => p.id === 'ios_simulators') || null);
   public llmProbe = computed(() => this.probes().find(p => p.id === 'gemini_api_key' || p.id === 'llm_api_key') || null);
   public geminiProbe = computed(() => this.llmProbe());
   public ocrProbe = computed(() => this.probes().find(p => p.id === 'vision_ocr_key' || p.id === 'ocr_api_key') || null);
@@ -85,7 +86,8 @@ export class SystemService {
 
   public isDeviceReady = computed(() => {
     const adb = this.adbProbe();
-    return adb?.status === 'pass';
+    // A selected iOS simulator satisfies the device requirement on its own.
+    return adb?.status === 'pass' || this.selectedIosDevice() != null;
   });
 
   // Step-level counting matching the 3-step onboarding guide
@@ -122,14 +124,43 @@ export class SystemService {
   }
 
 
-  // Device list from metadata
+  // Device list from metadata: Android devices plus available iOS simulators.
   public connectedDevices = computed<DeviceInfo[]>(() => {
-    const meta = this.adbProbe()?.metadata;
-    if (meta && Array.isArray(meta['devices'])) {
-      return meta['devices'] as DeviceInfo[];
+    const devices: DeviceInfo[] = [];
+    const adbMeta = this.adbProbe()?.metadata;
+    if (adbMeta && Array.isArray(adbMeta['devices'])) {
+      for (const d of adbMeta['devices'] as DeviceInfo[]) {
+        devices.push({ ...d, platform: d.platform ?? 'android' });
+      }
     }
-    return [];
+    const iosMeta = this.iosProbe()?.metadata;
+    if (iosMeta && Array.isArray(iosMeta['simulators'])) {
+      for (const s of iosMeta['simulators'] as any[]) {
+        if (!s?.udid) continue;
+        devices.push({
+          serial: s.udid,
+          state: s.state === 'Booted' ? 'device' : (s.state || 'unknown'),
+          model: s.name ?? null,
+          product: String(s.runtime ?? '')
+            .replace('com.apple.CoreSimulator.SimRuntime.', '')
+            .replace(/-/g, ' ') || null,
+          android_version: null,
+          screen_resolution: null,
+          is_locked: null,
+          is_emulator: true,
+          platform: 'ios',
+        });
+      }
+    }
+    return devices;
   });
+
+  // iOS selection lives client-side: iOS has no ADB probe to retarget, so
+  // the chosen simulator is carried in the run payload instead.
+  public selectedIosDevice = signal<DeviceInfo | null>(null);
+  public selectedDeviceSerial = computed<string | null>(
+    () => this.selectedIosDevice()?.serial ?? this.activeDevice()?.serial ?? null
+  );
 
   // Installed local AVD emulators from metadata
   public installedAvds = computed<string[]>(() => {
@@ -496,13 +527,19 @@ export class SystemService {
   }
 
   /**
-   * Select a specific connected device serial as active target
+   * Select a specific connected device or iOS simulator as active target
    */
-  public selectDevice(serial: string): Observable<any> {
+  public selectDevice(serial: string, platform: 'android' | 'ios' = 'android'): Observable<any> {
     this.isLoading.set(true);
-    return this.http.post<any>('/api/system/devices/select', { serial }).pipe(
+    return this.http.post<any>('/api/system/devices/select', { serial, platform }).pipe(
       tap({
         next: (res) => {
+          if (platform === 'ios' && res?.status === 'success') {
+            const dev = this.connectedDevices().find(d => d.serial === serial) ?? null;
+            this.selectedIosDevice.set(dev);
+          } else if (platform === 'android') {
+            this.selectedIosDevice.set(null);
+          }
           if (res?.report) {
             this.applyReadinessReport(res.report);
           }
@@ -510,6 +547,9 @@ export class SystemService {
         },
         error: (err) => {
           console.error('Failed to select active device:', err);
+          if (platform === 'ios') {
+            this.selectedIosDevice.set(null);
+          }
           this.isLoading.set(false);
         }
       })

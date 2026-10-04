@@ -371,6 +371,10 @@ export class HomeComponent implements OnInit, OnDestroy {
   // Device information
   public activeDevice = computed(() => this.systemService.activeDevice());
   public connectedDevices = computed(() => this.systemService.connectedDevices());
+  public selectedDeviceSerial = computed(() => this.systemService.selectedDeviceSerial());
+  public selectedTarget = computed<DeviceInfo | null>(
+    () => this.systemService.selectedIosDevice() ?? this.activeDevice()
+  );
   public installedAvds = computed(() => this.systemService.installedAvds());
   public emulatorPath = computed(() => this.systemService.emulatorPath());
   public isEmulatorInPath = computed(() => this.systemService.isEmulatorInPath());
@@ -1008,8 +1012,8 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.systemService.dismissEmulatorStatus().subscribe();
   }
 
-  public selectTargetDevice(serial: string): void {
-    this.systemService.selectDevice(serial).subscribe();
+  public selectTargetDevice(dev: DeviceInfo): void {
+    this.systemService.selectDevice(dev.serial, dev.platform ?? 'android').subscribe();
   }
 
   public getEmulatorCommand(avdName: string): string {
