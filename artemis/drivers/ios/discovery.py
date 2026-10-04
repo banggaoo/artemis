@@ -24,6 +24,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from typing import Any
 
 from third_party.mobile_use.utils.logger import get_logger
@@ -31,6 +32,35 @@ from third_party.mobile_use.utils.logger import get_logger
 logger = get_logger(__name__)
 
 SIMCTL_QUERY_TIMEOUT = 15.0
+
+# ``simctl list devices`` takes seconds on a busy host and every iOS consumer
+# (readiness probe, device pool validation, /api/devices) enumerates it. Share
+# one result briefly so polling UIs do not spawn back-to-back simctl calls.
+_SIMULATOR_CACHE_TTL = 10.0
+_simulator_cache: list[dict[str, Any]] | None = None
+_simulator_cache_time = 0.0
+
+
+def clear_ios_simulator_cache() -> None:
+    """Drop the cached enumeration (e.g. after the driver boots a simulator)."""
+    global _simulator_cache, _simulator_cache_time
+    _simulator_cache = None
+    _simulator_cache_time = 0.0
+
+
+def _cache_simulators(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    global _simulator_cache, _simulator_cache_time
+    _simulator_cache = devices
+    _simulator_cache_time = time.monotonic()
+    return devices
+
+
+def _cached_simulators() -> list[dict[str, Any]] | None:
+    if _simulator_cache is None:
+        return None
+    if time.monotonic() - _simulator_cache_time > _SIMULATOR_CACHE_TTL:
+        return None
+    return _simulator_cache
 
 
 async def run_xcrun(*arguments: str, timeout: float = 30.0) -> bytes:
@@ -77,26 +107,42 @@ def parse_simctl_devices(payload: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-async def list_ios_simulators() -> list[dict[str, Any]] | None:
-    """All available iOS simulators, or ``None`` when enumeration fails."""
+async def list_ios_simulators(
+    force_refresh: bool = False,
+) -> list[dict[str, Any]] | None:
+    """All available iOS simulators, or ``None`` when enumeration fails.
+
+    Successful enumerations are cached for ``_SIMULATOR_CACHE_TTL`` seconds;
+    failures are never cached so callers retry against live simctl.
+    """
     if not simctl_available():
         return None
+    if not force_refresh:
+        cached = _cached_simulators()
+        if cached is not None:
+            return cached
     try:
         raw = await run_xcrun("simctl", "list", "devices", "--json", timeout=SIMCTL_QUERY_TIMEOUT)
     except (OSError, RuntimeError, TimeoutError) as exc:
         logger.debug(f"simctl device enumeration failed: {exc}")
         return None
     try:
-        return parse_simctl_devices(json.loads(raw))
+        return _cache_simulators(parse_simctl_devices(json.loads(raw)))
     except (ValueError, TypeError) as exc:
         logger.debug(f"simctl device list parse failed: {exc}")
         return None
 
 
-def list_ios_simulators_sync() -> list[dict[str, Any]] | None:
+def list_ios_simulators_sync(
+    force_refresh: bool = False,
+) -> list[dict[str, Any]] | None:
     """Synchronous variant for non-async callers (e.g. replay device lists)."""
     if not simctl_available():
         return None
+    if not force_refresh:
+        cached = _cached_simulators()
+        if cached is not None:
+            return cached
     try:
         completed = subprocess.run(
             ["xcrun", "simctl", "list", "devices", "--json"],
@@ -111,7 +157,7 @@ def list_ios_simulators_sync() -> list[dict[str, Any]] | None:
     if completed.returncode != 0:
         return None
     try:
-        return parse_simctl_devices(json.loads(completed.stdout))
+        return _cache_simulators(parse_simctl_devices(json.loads(completed.stdout)))
     except (ValueError, TypeError) as exc:
         logger.debug(f"simctl device list parse failed: {exc}")
         return None
