@@ -212,7 +212,7 @@ describe('SystemService readiness polling', () => {
     expect(booted?.platform).toBe('ios');
     expect(booted?.model).toBe('iPhone 18 Pro');
     expect(booted?.state).toBe('device');
-    expect(booted?.product).toBe('iOS 27 0');
+    expect(booted?.product).toBe('iOS 27.0');
     expect(booted?.is_emulator).toBeTrue();
     const shutdown = devices.find(d => d.serial === 'AAAA1111-2222-3333-4444-555566667777');
     expect(shutdown?.state).toBe('Shutdown');
@@ -262,7 +262,7 @@ describe('SystemService readiness polling', () => {
       serial: 'UDID-1',
       state: 'device',
       model: 'iPhone',
-      product: 'iOS 27 0',
+      product: 'iOS 27.0',
       android_version: null,
       screen_resolution: null,
       is_locked: null,

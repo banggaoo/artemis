@@ -1717,7 +1717,7 @@
                   <div class="device-hero-card">
                     <div class="device-avatar">
                       <span class="material-symbols-outlined device-hero-icon">
-                        phone_iphone
+                        {{ sim.model?.includes('iPad') ? 'tablet_mac' : 'phone_iphone' }}
                       </span>
                     </div>
                     <div class="device-hero-details">
@@ -1734,9 +1734,9 @@
                         }
                       </div>
                     </div>
-                    <div class="device-hero-status">
-                      <span class="status-dot dot-pass"></span>
-                      <span class="status-text">Connected</span>
+                    <div class="device-hero-status" [class.status-idle]="sim.state !== 'device'">
+                      <span class="status-dot" [class.dot-pass]="sim.state === 'device'" [class.dot-warn]="sim.state !== 'device'"></span>
+                      <span class="status-text">{{ sim.state === 'device' ? 'Booted' : 'Shutdown — boots on run' }}</span>
                     </div>
                   </div>
                 </div>
@@ -1763,13 +1763,10 @@
                         (click)="selectTargetDevice(dev)"
                       >
                         <span class="material-symbols-outlined chip-icon">
-                          phone_iphone
+                          {{ dev.model?.includes('iPad') ? 'tablet_mac' : 'phone_iphone' }}
                         </span>
-                        <span>{{ dev.model || dev.serial }}</span>
-                        @if (dev.state !== 'device') {
-                          <span class="sim-state">({{ dev.state }})</span>
-                        }
-                        <span class="ios-badge">iOS</span>
+                        <span class="chip-name">{{ dev.model || dev.serial }}</span>
+                        <span class="sim-state-dot" [class.booted]="dev.state === 'device'" [class.booting]="dev.state === 'Booting'" [title]="dev.state === 'device' ? 'Booted' : dev.state"></span>
                         @if (dev.serial === selectedDeviceSerial()) {
                           <span class="active-check">✓ Active</span>
                         }
