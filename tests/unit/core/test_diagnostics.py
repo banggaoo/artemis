@@ -431,6 +431,177 @@ async def test_emulator_manager_lifecycle():
     assert manager.get_status().status == EmulatorLaunchStage.IDLE
 
 
+def _fake_proc(pid: int = 1111, alive_polls: int = 5, exit_code: int = 1):
+    """Popen-shaped mock that reports alive for `alive_polls` polls then exits."""
+    proc = Mock()
+    proc.pid = pid
+    calls = {"n": 0}
+
+    def _poll():
+        calls["n"] += 1
+        return None if calls["n"] <= alive_polls else exit_code
+
+    proc.poll.side_effect = _poll
+    proc.stdout.readline.return_value = ""
+    return proc
+
+
+@pytest.mark.asyncio
+async def test_emulator_spawn_passes_extra_args(monkeypatch):
+    """_spawn_emulator appends extra emulator CLI args and tracks the proc."""
+    import subprocess
+    import time
+
+    from artemis.core.diagnostics.emulator_manager import EmulatorManager
+
+    manager = EmulatorManager()
+    spawned = {}
+
+    def _fake_popen(cmd, **kwargs):
+        spawned["cmd"] = cmd
+        return _fake_proc()
+
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    proc = manager._spawn_emulator("/sdk/emulator", "Pixel_9", ["-no-snapshot-load"])
+
+    assert spawned["cmd"] == ["/sdk/emulator", "-avd", "Pixel_9", "-no-snapshot-load"]
+    assert manager._proc is proc
+
+
+def test_emulator_snapshot_failure_detection():
+    from artemis.core.diagnostics.emulator_manager import EmulatorManager
+
+    manager = EmulatorManager()
+    assert manager._log_reports_snapshot_failure() is False
+
+    manager._log_buffer.append("INFO | Advertising in: /tmp/pid_1.ini")
+    assert manager._log_reports_snapshot_failure() is False
+
+    manager._log_buffer.append(
+        "WARNING | Device 'encrypt' does not have the requested snapshot 'default_boot'"
+    )
+    assert manager._log_reports_snapshot_failure() is True
+
+    manager._log_buffer.clear()
+    manager._log_buffer.append("WARNING | Failed to load snapshot 'default_boot'")
+    assert manager._log_reports_snapshot_failure() is True
+
+
+@pytest.mark.asyncio
+async def test_emulator_snapshot_retry_restarts_without_load(monkeypatch):
+    """A corrupted snapshot triggers one restart with -no-snapshot-load."""
+    import time
+
+    from artemis.core.diagnostics.emulator_manager import EmulatorManager
+
+    manager = EmulatorManager()
+    old_proc = _fake_proc(pid=1)
+    new_proc = _fake_proc(pid=2)
+    calls = {}
+
+    monkeypatch.setattr(manager, "_locate_emulator", lambda: "/sdk/emulator")
+    monkeypatch.setattr(manager, "_terminate_proc", lambda p: calls.setdefault("term", p))
+
+    def _spawn(path, avd, extra):
+        calls["spawn"] = (path, avd, extra)
+        return new_proc
+
+    monkeypatch.setattr(manager, "_spawn_emulator", _spawn)
+    tracked = AsyncMock()
+    monkeypatch.setattr(manager, "_track_boot_lifecycle", tracked)
+
+    await manager._retry_without_snapshot("Pixel_9", old_proc)
+
+    assert calls["term"] is old_proc
+    assert calls["spawn"] == ("/sdk/emulator", "Pixel_9", ["-no-snapshot-load"])
+    assert manager._current_state.pid == 2
+    tracked.assert_awaited_once()
+    args, kwargs = tracked.await_args
+    assert args[0] == "Pixel_9" and args[1] is new_proc
+    assert kwargs["allow_snapshot_retry"] is False
+    assert kwargs["max_wait_seconds"] == 480
+
+
+@pytest.mark.asyncio
+async def test_emulator_tracker_retries_on_snapshot_failure(monkeypatch):
+    """Phase-1 detection invokes the snapshot retry and returns."""
+    import time
+
+    from artemis.core.diagnostics.emulator_manager import EmulatorManager
+
+    manager = EmulatorManager()
+    manager._log_buffer.append("WARNING | Failed to load snapshot 'default_boot'")
+    retry = AsyncMock()
+    monkeypatch.setattr(manager, "_retry_without_snapshot", retry)
+    monkeypatch.setattr(manager, "_locate_adb", lambda: "adb")
+
+    proc = _fake_proc(alive_polls=999)
+    await manager._track_boot_lifecycle("Pixel_9", proc, time.time())
+
+    retry.assert_awaited_once_with("Pixel_9", proc)
+
+
+@pytest.mark.asyncio
+async def test_emulator_tracker_ignores_offline_serial(monkeypatch):
+    """`adb devices` entries in `offline` state do not count as connected."""
+    import asyncio
+    import time
+
+    from artemis.core.diagnostics.emulator_manager import (
+        EmulatorLaunchStage,
+        EmulatorManager,
+    )
+
+    manager = EmulatorManager()
+    monkeypatch.setattr(manager, "_locate_adb", lambda: "adb")
+
+    adb_proc = Mock()
+    adb_proc.communicate = AsyncMock(return_value=(b"emulator-5554\toffline\n", b""))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=adb_proc))
+
+    # Alive through Phase 1, dies on the third Phase-2 poll.
+    proc = _fake_proc(alive_polls=7, exit_code=1)
+    await manager._track_boot_lifecycle("Pixel_9", proc, time.time(), max_wait_seconds=60)
+
+    state = manager._current_state
+    assert state.status == EmulatorLaunchStage.FAILED
+    assert state.serial is None
+    assert "terminated unexpectedly" in (state.error or "")
+
+
+@pytest.mark.asyncio
+async def test_emulator_tracker_accepts_device_serial(monkeypatch):
+    """`adb devices` entries in `device` state advance to the boot phase."""
+    import asyncio
+    import time
+
+    from artemis.core.diagnostics.emulator_manager import (
+        EmulatorLaunchStage,
+        EmulatorManager,
+    )
+
+    manager = EmulatorManager()
+    monkeypatch.setattr(manager, "_locate_adb", lambda: "adb")
+
+    adb_proc = Mock()
+    adb_proc.communicate = AsyncMock(
+        return_value=(
+            b"emulator-5554\tdevice product:sdk model:sdk device:emu64a\n",
+            b"",
+        )
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=adb_proc))
+
+    # Alive through Phase 1 + first Phase-2 poll, dies in Phase 3.
+    proc = _fake_proc(alive_polls=7, exit_code=1)
+    await manager._track_boot_lifecycle("Pixel_9", proc, time.time(), max_wait_seconds=60)
+
+    state = manager._current_state
+    assert state.status == EmulatorLaunchStage.FAILED
+    assert state.serial == "emulator-5554"
+    assert "crashed during OS boot" in (state.error or "")
+
+
 @pytest.mark.asyncio
 async def test_build_report_turns_crashing_probe_into_fail_result():
     engine = ReadinessEngine()

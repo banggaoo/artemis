@@ -200,23 +200,8 @@ class EmulatorManager:
                 if self._track_task and not self._track_task.done():
                     self._track_task.cancel()
 
-                # Spawn emulator process capturing stdout & stderr
-                proc = subprocess.Popen(
-                    [emu_path, "-avd", clean_avd],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    **self._subprocess_creation_kwargs(),
-                )
-                self._proc = proc
+                proc = self._spawn_emulator(emu_path, clean_avd, [])
                 now = time.time()
-
-                # Start reader thread for stdout/stderr
-                self._reader_thread = threading.Thread(
-                    target=self._stream_logs, args=(proc,), daemon=True
-                )
-                self._reader_thread.start()
 
                 self._current_state = EmulatorLaunchState(
                     avd_name=clean_avd,
@@ -248,11 +233,91 @@ class EmulatorManager:
                 )
                 return self.get_status()
 
-    async def _track_boot_lifecycle(self, avd_name: str, proc: subprocess.Popen, started_at: float):
+    def _spawn_emulator(
+        self, emu_path: str, avd_name: str, extra_args: list[str]
+    ) -> subprocess.Popen:
+        """Spawn the emulator process and start its stdout/stderr reader thread."""
+        proc = subprocess.Popen(
+            [emu_path, "-avd", avd_name, *extra_args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            **self._subprocess_creation_kwargs(),
+        )
+        self._proc = proc
+        self._reader_thread = threading.Thread(target=self._stream_logs, args=(proc,), daemon=True)
+        self._reader_thread.start()
+        return proc
+
+    @staticmethod
+    def _terminate_proc(proc: subprocess.Popen) -> None:
+        """Ask QEMU to exit so it releases AVD locks; kill if it lingers."""
+        try:
+            proc.terminate()
+            proc.wait(timeout=10)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def _log_reports_snapshot_failure(self) -> bool:
+        """True when the emulator reported an unusable quick-boot snapshot."""
+        return any(
+            "snapshot" in line.lower()
+            and ("failed" in line.lower() or "does not have" in line.lower())
+            for line in self._log_buffer
+        )
+
+    async def _retry_without_snapshot(self, avd_name: str, proc: subprocess.Popen) -> None:
+        """Restart QEMU skipping the corrupted quick-boot snapshot.
+
+        ``-no-snapshot-load`` keeps snapshot *saving* enabled so a clean exit
+        rewrites a healthy snapshot for the next (fast) launch.
+        """
+        logger.warning(
+            f"[EmulatorManager] '{avd_name}' snapshot failed to load; "
+            "restarting without the saved snapshot."
+        )
+        self._log_buffer.append(
+            "Saved quick-boot snapshot is unusable; restarting with "
+            "-no-snapshot-load (first boot may take several minutes)."
+        )
+        self._terminate_proc(proc)
+        emu_path = self._locate_emulator()
+        if not emu_path:
+            self._current_state = EmulatorLaunchState(
+                avd_name=avd_name,
+                status=EmulatorLaunchStage.FAILED,
+                error="Emulator binary not found for snapshot retry; original process was stopped.",
+                stage_message="Snapshot retry failed: emulator binary not found.",
+                logs=list(self._log_buffer),
+            )
+            return
+        new_proc = self._spawn_emulator(emu_path, avd_name, ["-no-snapshot-load"])
+        self._current_state.pid = new_proc.pid
+        # Cold boots (fresh dexopt/package scan) legitimately take several
+        # times longer than a snapshot restore.
+        await self._track_boot_lifecycle(
+            avd_name,
+            new_proc,
+            time.time(),
+            allow_snapshot_retry=False,
+            max_wait_seconds=480,
+        )
+
+    async def _track_boot_lifecycle(
+        self,
+        avd_name: str,
+        proc: subprocess.Popen,
+        started_at: float,
+        allow_snapshot_retry: bool = True,
+        max_wait_seconds: int = 180,
+    ):
         """Monitor emulator lifecycle from process execution to ADB connection and OS boot completion."""
         adb_path = self._locate_adb()
         detected_serial: str | None = None
-        max_wait_seconds = 180  # 3 minutes maximum boot timeout
 
         try:
             # Phase 1: Early crash detection (first 5 seconds)
@@ -278,6 +343,14 @@ class EmulatorManager:
                         elapsed_seconds=int(time.time() - started_at),
                         logs=list(self._log_buffer),
                     )
+                    return
+
+                # A corrupted quick-boot snapshot hangs the boot for minutes
+                # before the ADB handshake. Detect the load failure early and
+                # restart without loading it; the exit save then re-writes a
+                # healthy snapshot for the next launch.
+                if allow_snapshot_retry and self._log_reports_snapshot_failure():
+                    await self._retry_without_snapshot(avd_name, proc)
                     return
 
             # Phase 2: Waiting for ADB handshake
@@ -306,6 +379,13 @@ class EmulatorManager:
                     )
                     return
 
+                # The snapshot failure line can arrive after Phase 1 when
+                # QEMU init is slow; still worth retrying while no serial
+                # has appeared.
+                if allow_snapshot_retry and self._log_reports_snapshot_failure():
+                    await self._retry_without_snapshot(avd_name, proc)
+                    return
+
                 # Check adb devices for emulator serial
                 try:
                     p = await asyncio.create_subprocess_exec(
@@ -315,15 +395,22 @@ class EmulatorManager:
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                     )
-                    stdout, _ = await p.communicate()
+                    try:
+                        stdout, _ = await asyncio.wait_for(p.communicate(), timeout=10)
+                    except TimeoutError:
+                        p.kill()
+                        await p.wait()
+                        continue
                     out_text = stdout.decode(errors="replace")
 
-                    # Scan for emulator-*
+                    # Scan for emulator-* — only a `device` state entry is
+                    # usable; `offline`/`unauthorized` keep waiting, and
+                    # `adb -s <serial>` would block on them indefinitely.
                     for line in out_text.splitlines():
                         line = line.strip()
                         if line.startswith("emulator-"):
                             parts = line.split()
-                            if parts:
+                            if len(parts) > 1 and parts[1] == "device":
                                 detected_serial = parts[0]
                                 break
                 except Exception as e:
@@ -363,6 +450,7 @@ class EmulatorManager:
                         avd_name=avd_name,
                         status=EmulatorLaunchStage.FAILED,
                         pid=proc.pid,
+                        serial=detected_serial,
                         error=f"Emulator process crashed during OS boot (exit code {poll_res}).",
                         stage_message="Process crashed during OS boot",
                         started_at=started_at,
@@ -382,7 +470,15 @@ class EmulatorManager:
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                     )
-                    stdout, _ = await p.communicate()
+                    try:
+                        stdout, _ = await asyncio.wait_for(p.communicate(), timeout=15)
+                    except TimeoutError:
+                        # `adb -s` blocks while the transport is offline;
+                        # kill it and keep polling instead of hanging the
+                        # tracker past the boot deadline.
+                        p.kill()
+                        await p.wait()
+                        continue
                     boot_completed = stdout.decode(errors="replace").strip()
 
                     if boot_completed == "1":
