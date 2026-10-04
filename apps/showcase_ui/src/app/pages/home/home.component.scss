@@ -1761,6 +1761,10 @@ $text-light: #94a3b8;
             margin-left: auto;
             flex-shrink: 0;
 
+            &.status-idle {
+              color: #b45309;
+            }
+
             .status-dot {
               width: 7px;
               height: 7px;
@@ -1768,6 +1772,12 @@ $text-light: #94a3b8;
               background: #10b981;
               box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
               animation: statusDotPulse 2s infinite cubic-bezier(0.4, 0, 0.6, 1);
+
+              &.dot-warn {
+                background: #f59e0b;
+                box-shadow: none;
+                animation: none;
+              }
             }
           }
 
@@ -1811,20 +1821,24 @@ $text-light: #94a3b8;
                 font-size: 14px;
               }
 
-              .ios-badge {
-                font-size: 9px;
-                font-weight: 700;
-                padding: 1px 5px;
-                border-radius: 4px;
-                background: #eef2ff;
-                color: #4f46e5;
-                letter-spacing: 0.3px;
+              .chip-name {
+                color: $text-main;
               }
 
-              .sim-state {
-                font-size: 10px;
-                color: $text-secondary;
-                font-weight: 500;
+              .sim-state-dot {
+                width: 7px;
+                height: 7px;
+                border-radius: 50%;
+                background: #94a3b8;
+                flex-shrink: 0;
+
+                &.booted {
+                  background: #10b981;
+                }
+
+                &.booting {
+                  background: #f59e0b;
+                }
               }
 
               .active-check {
