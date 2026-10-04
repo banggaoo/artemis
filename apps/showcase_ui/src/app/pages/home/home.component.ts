@@ -372,6 +372,7 @@ export class HomeComponent implements OnInit, OnDestroy {
   public activeDevice = computed(() => this.systemService.activeDevice());
   public connectedDevices = computed(() => this.systemService.connectedDevices());
   public selectedDeviceSerial = computed(() => this.systemService.selectedDeviceSerial());
+  public iosDevices = computed(() => this.systemService.iosDevices());
   public selectedTarget = computed<DeviceInfo | null>(
     () => this.systemService.selectedIosDevice() ?? this.activeDevice()
   );
