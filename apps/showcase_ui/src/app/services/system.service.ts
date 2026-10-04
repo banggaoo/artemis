@@ -143,7 +143,7 @@ export class SystemService {
           model: s.name ?? null,
           product: String(s.runtime ?? '')
             .replace('com.apple.CoreSimulator.SimRuntime.', '')
-            .replace(/-/g, ' ') || null,
+            .replace(/^([A-Za-z]+)-(.+)$/, (_m: string, name: string, ver: string) => `${name} ${ver.replace(/-/g, '.')}`) || null,
           android_version: null,
           screen_resolution: null,
           is_locked: null,
