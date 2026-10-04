@@ -1821,6 +1821,12 @@ $text-light: #94a3b8;
                 letter-spacing: 0.3px;
               }
 
+              .sim-state {
+                font-size: 10px;
+                color: $text-secondary;
+                font-weight: 500;
+              }
+
               .active-check {
                 color: $emerald;
                 font-size: 10.5px;
@@ -2404,6 +2410,44 @@ $text-light: #94a3b8;
         display: flex;
         flex-direction: column;
         gap: 12px;
+
+        .ios-sim-panel {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          padding: 12px;
+          border: 1px solid #e0e7ff;
+          border-radius: 8px;
+          background: #f8faff;
+
+          .ios-sim-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+
+            .ios-sim-icon {
+              font-size: 20px;
+              color: #4f46e5;
+            }
+
+            .ios-sim-header-text {
+              display: flex;
+              flex-direction: column;
+            }
+
+            .ios-sim-title {
+              font-size: 12.5px;
+              font-weight: 700;
+              color: $text-main;
+            }
+
+            .ios-sim-desc {
+              font-size: 11px;
+              color: $text-secondary;
+            }
+          }
+
+        }
 
         .connection-methods-nav {
           display: grid;
