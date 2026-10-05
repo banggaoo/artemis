@@ -106,9 +106,10 @@ cd artemis
 
 ### iOS Simulator (macOS, Xcode 27+)
 
-Standalone CLI and embedded Python SDK tasks can target iOS simulators through
-Xcode's native MCP device-interaction tools. See the [iOS setup and usage guide](./docs/ios.md)
-for prerequisites, Xcode access approval, and current limits:
+CLI, embedded Python SDK, web console, and daemon tasks can target iOS
+simulators through Xcode's native MCP device-interaction tools. See the
+[iOS setup and usage guide](./docs/ios.md) for prerequisites, Xcode access
+approval, and current limits:
 
 ```bash
 bash scripts/setup_ios_env.sh
@@ -312,7 +313,7 @@ ARTEMIS supports two execution profiles tailored for different automation requir
 ## Roadmap
 
 - [ ] **Android Studio Integration**: Native IDE plugin and workflow integration to enable in-editor debugging, test recording, and automated device control directly within Android Studio.
-- [ ] **iOS Platform Expansion**: [Standalone iOS Simulator support](./docs/ios.md) is available with Xcode 27+; physical devices and web/daemon integration remain planned.
+- [ ] **iOS Platform Expansion**: [iOS Simulator support](./docs/ios.md) is available with Xcode 27+ across the CLI, SDK, web console, daemon, MCP, replay, and streaming; physical devices remain planned.
 - [ ] **On-Device Lightweight VLMs**: Local execution with lightweight edge vision models for low-latency, privacy-first automation.
 - [ ] **Real-time Duplex Voice Interaction**: Voice-driven task dispatch with real-time conversational control and interruption handling.
 
