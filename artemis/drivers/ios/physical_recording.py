@@ -22,6 +22,7 @@ devicectl round-trip time).
 """
 
 import asyncio
+import contextlib
 from io import BytesIO
 from pathlib import Path
 import tempfile
@@ -380,6 +381,9 @@ class PhysicalIosRecorder:
             session.is_active = False
             if session.poll_task and not session.poll_task.done():
                 session.poll_task.cancel()
+            if session.poll_task is not None:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await session.poll_task
             raise
         session.watchdog_task = asyncio.create_task(self._watchdog(session))
         return session
