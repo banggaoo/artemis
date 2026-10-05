@@ -108,8 +108,8 @@ cd artemis
 
 ### iOS 设备（macOS，Xcode 27+）
 
-CLI、嵌入式 Python SDK、Web 控制台与守护进程任务都可以通过 Xcode 原生 MCP 设备交互工具控制 iOS 模拟器，真机另经 devicectl 管理生命周期。
-安装要求、Xcode 权限审批和当前限制见 [iOS 使用指南（英文）](./docs/ios.md)：
+CLI、嵌入式 Python SDK、Web 控制台与守护进程任务都可以通过 Xcode 原生 MCP 设备交互工具控制 iOS 模拟器；真机（iPhone/iPad）则通过 `devicectl` 管理生命周期、并在设备上安装 WebDriverAgent 负责界面操作。
+安装要求、Xcode 权限审批、WDA 配置和当前限制见 [iOS 使用指南（英文）](./docs/ios.md)：
 
 ```bash
 bash scripts/setup_ios_env.sh

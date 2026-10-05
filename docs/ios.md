@@ -9,11 +9,14 @@ discovery, live screen streaming, and per-device locking that cannot collide
 with Android targets.
 
 The iOS drivers use tools included with Xcode and Artemis's existing Python MCP
-dependency. They communicate with `xcrun mcpbridge` using an initialized MCP
-session for screen observation and input. Simulators use `xcrun simctl` for
-lifecycle operations; physical devices use `xcrun devicectl` (CoreDevice).
-Appium, WebDriverAgent, and third-party device control utilities are not
-required. Apple added native agent device interactions in Xcode 27; see the
+dependency. Simulators communicate with `xcrun mcpbridge` using an initialized
+MCP session for screen observation and input, and `xcrun simctl` for lifecycle
+operations. Physical devices use `xcrun devicectl` (CoreDevice) for lifecycle
+plus **WebDriverAgent (WDA)** for observation and input — Xcode's
+`DeviceInteraction*` MCP tools accept simulators only. WDA is the same
+XCUITest HTTP bridge Appium uses and must be built and installed on the device
+once (see below). Apple added native agent device interactions in Xcode 27;
+see the
 [Xcode 27 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27-release-notes).
 
 ## Prepare Xcode
@@ -95,10 +98,40 @@ uv run artemis run "Open Settings" \
 ```
 
 Physical UDIDs are routed to a separate driver: `devicectl` handles install,
-launch, terminate, app listing, and URL opening, while the same Xcode
-interaction session supplies screenshots, hierarchy, taps, swipes, and text.
-`booted` remains a simulator-only selector — physical tasks always require an
-explicit `--device-serial`.
+launch, terminate, app listing, URL opening, and screenshot capture, while
+the UI hierarchy and input (taps, swipes, text, buttons) go through
+**WebDriverAgent**. `booted` remains a simulator-only selector — physical
+tasks always require an explicit `--device-serial`.
+
+#### WebDriverAgent setup (one time per device)
+
+WDA is a signed XCTest runner app that exposes an HTTP automation endpoint on
+port 8100. Build and install it once per device — Appium users can reuse an
+existing WDA install:
+
+```bash
+git clone https://github.com/appium/WebDriverAgent.git
+cd WebDriverAgent
+xcodebuild build-for-testing -project WebDriverAgent.xcodeproj \
+  -scheme WebDriverAgentRunner -destination id=<DEVICE-UDID> \
+  -allowProvisioningUpdates DEVELOPMENT_TEAM=<TEAM-ID> \
+  PRODUCT_BUNDLE_IDENTIFIER=com.example.WebDriverAgentRunner
+xcrun devicectl device install app --device <DEVICE-UDID> \
+  <DerivedData>/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app
+```
+
+Any Apple development team works; a free Personal Team profile must be
+re-signed every 7 days while paid-program profiles last a year.
+
+When Artemis connects, it finds an installed `*WebDriverAgent*` runner on the
+device, launches it via `devicectl process launch`, and probes its HTTP
+endpoint on the CoreDevice tunnel address and `127.0.0.1:8100` (for
+`iproxy`/`pymobiledevice3` port forwards). Endpoint overrides:
+
+- `ARTEMIS_IOS_WDA_URL` — full base URL, e.g. `http://127.0.0.1:8100` or
+  `http://<device-LAN-ip>:8100`
+- `ARTEMIS_IOS_WDA_HOST` — host only; port 8100 assumed
+- `ARTEMIS_IOS_WDA_BUNDLE_ID` — nonstandard runner bundle identifier
 
 Differences from simulators:
 
@@ -229,10 +262,10 @@ instead of acquiring a second one.
 | Operation | Simulator | Physical device |
 | --- | --- | --- |
 | Device selection and readiness | `simctl` inventory, `boot`, `bootstatus` | `devicectl` inventory; must be paired and connected |
-| Screenshot and accessibility hierarchy | Xcode native device-interaction MCP session | Same session (`deviceIsSimulator=false`) |
-| Tap, long press, and swipe | Native synthesized touch events | Same |
-| Text entry | Native keyboard synthesis with `clear_exist=false` | Same |
-| Enter, Home, Power, volume, and app switcher | Native keyboard and button synthesis | Same |
+| Screenshot and accessibility hierarchy | Xcode native device-interaction MCP session | WDA `/source` and `/screenshot` (devicectl screenshot fallback) |
+| Tap, long press, and swipe | Native synthesized touch events | WDA W3C pointer actions |
+| Text entry | Native keyboard synthesis with `clear_exist=false` | WDA `/wda/keys`, `clear_exist=false` |
+| Enter, Home, Power, volume, and app switcher | Native keyboard and button synthesis | WDA `/wda/homescreen` and `/wda/pressButton` |
 | App install, launch, and terminate | `simctl` with simulator `.app` bundles | `devicectl` with signed `.app`/`.ipa`; terminate uses the launch PID or a live process scan |
 | Screen recording | `simctl io recordVideo` (VFR H.264) | `devicectl` screenshot polling assembled to timestamped MP4 |
 
@@ -296,8 +329,17 @@ the timeline rather than stretching recorded frames.
 - **Physical install fails:** the artifact must be signed for the device —
   check the signing team and provisioning profile, or build an `.ipa` with
   `xcodebuild -exportArchive` for the device destination.
-- **Physical input fails on a locked device:** unlock the device; the
-  interaction session cannot inject touches while locked.
+- **Physical input fails on a locked device:** unlock the device; WDA cannot
+  inject touches while locked.
+- **"No WebDriverAgent server answers":** no WDA endpoint responded on the
+  CoreDevice tunnel or `127.0.0.1:8100`, and no installed runner matching
+  `*WebDriverAgent*` was found to launch. Build and install the WDA runner
+  (one-time steps above), or point `ARTEMIS_IOS_WDA_URL` at a forwarded or
+  LAN-reachable server.
+- **WDA runner launches but never answers:** the runner may be crashing on
+  launch — check provisioning (`get-task-allow`, matching certificate) and
+  whether a free-team profile expired; also try forwarding port 8100
+  (`iproxy 8100 8100`) and setting `ARTEMIS_IOS_WDA_URL`.
 - **A queued iOS task runs on the wrong surface:** confirm the submission
   carried `platform: "ios"` (CLI `--platform ios`, web request `platform`,
   or the MCP `platform` argument); tasks default to Android.
