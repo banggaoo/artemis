@@ -198,7 +198,7 @@ def run_command(
             "--platform",
             metavar="PLATFORM",
             rich_help_panel="Platform",
-            help="Target mobile platform: Android (default) or a local iOS simulator.",
+            help="Target mobile platform: Android (default) or a local iOS device.",
         ),
     ] = DevicePlatform.ANDROID,
     ios_workspace: Annotated[
@@ -316,7 +316,7 @@ def run_command(
         typer.Option(
             "--device-serial",
             "-s",
-            help="Android serial or iOS simulator UDID; iOS defaults to the single 'booted' simulator.",
+            help="Android serial or iOS device UDID (simulator or paired physical device); iOS defaults to the single 'booted' simulator.",
         ),
     ] = None,
     session_id: Annotated[

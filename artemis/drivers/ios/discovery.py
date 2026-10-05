@@ -161,3 +161,151 @@ def list_ios_simulators_sync(
     except (ValueError, TypeError) as exc:
         logger.debug(f"simctl device list parse failed: {exc}")
         return None
+
+
+# --- CoreDevice (physical iPhone/iPad) enumeration -------------------------
+
+DEVICECTL_QUERY_TIMEOUT = 20.0
+_core_device_cache: list[dict[str, Any]] | None = None
+_core_device_cache_time = 0.0
+
+
+def clear_core_device_cache() -> None:
+    """Drop the cached CoreDevice enumeration."""
+    global _core_device_cache, _core_device_cache_time
+    _core_device_cache = None
+    _core_device_cache_time = 0.0
+
+
+def _cache_core_devices(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    global _core_device_cache, _core_device_cache_time
+    _core_device_cache = devices
+    _core_device_cache_time = time.monotonic()
+    return devices
+
+
+def _cached_core_devices() -> list[dict[str, Any]] | None:
+    if _core_device_cache is None:
+        return None
+    if time.monotonic() - _core_device_cache_time > _SIMULATOR_CACHE_TTL:
+        return None
+    return _core_device_cache
+
+
+def _device_property(device: dict[str, Any], section: str, key: str) -> Any:
+    """Read a property across devicectl's current and deprecated JSON shapes.
+
+    Xcode marks ``hardwareProperties``/``deviceProperties``/``connectionProperties``
+    deprecated in favor of a nested ``properties`` dictionary; accept both.
+    """
+    value = device.get(section, {}).get(key)
+    if value is not None:
+        return value
+    return device.get("properties", {}).get(section, {}).get(key)
+
+
+def parse_devicectl_devices(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten ``devicectl list devices --json-output -`` into device entries."""
+    devices = []
+    for device in payload.get("result", {}).get("devices", []):
+        udid = _device_property(device, "hardwareProperties", "udid")
+        if not udid:
+            continue
+        devices.append(
+            {
+                "udid": udid,
+                "name": _device_property(device, "deviceProperties", "name"),
+                "os_version": _device_property(
+                    device, "deviceProperties", "osVersionNumber"
+                ),
+                "platform": _device_property(device, "hardwareProperties", "platform"),
+                "reality": _device_property(device, "hardwareProperties", "reality"),
+                "product_type": _device_property(
+                    device, "hardwareProperties", "productType"
+                ),
+                "connection_state": _device_property(
+                    device, "connectionProperties", "tunnelState"
+                ),
+                "pairing_state": _device_property(
+                    device, "connectionProperties", "pairingState"
+                ),
+                "visibility": device.get("visibilityClass"),
+            }
+        )
+    return devices
+
+
+async def list_core_devices(
+    force_refresh: bool = False,
+) -> list[dict[str, Any]] | None:
+    """All devices known to CoreDevice (physical and simulated), cached briefly."""
+    if not simctl_available():
+        return None
+    if not force_refresh:
+        cached = _cached_core_devices()
+        if cached is not None:
+            return cached
+    try:
+        raw = await run_xcrun(
+            "devicectl", "list", "devices", "--json-output", "-", timeout=DEVICECTL_QUERY_TIMEOUT
+        )
+    except (OSError, RuntimeError, TimeoutError) as exc:
+        logger.debug(f"devicectl device enumeration failed: {exc}")
+        return None
+    try:
+        return _cache_core_devices(parse_devicectl_devices(json.loads(raw)))
+    except (ValueError, TypeError) as exc:
+        logger.debug(f"devicectl device list parse failed: {exc}")
+        return None
+
+
+def list_core_devices_sync(
+    force_refresh: bool = False,
+) -> list[dict[str, Any]] | None:
+    """Synchronous variant for the driver factory and other sync callers."""
+    if not simctl_available():
+        return None
+    if not force_refresh:
+        cached = _cached_core_devices()
+        if cached is not None:
+            return cached
+    try:
+        completed = subprocess.run(
+            ["xcrun", "devicectl", "list", "devices", "--json-output", "-"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=DEVICECTL_QUERY_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.debug(f"devicectl device enumeration failed: {exc}")
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        return _cache_core_devices(parse_devicectl_devices(json.loads(completed.stdout)))
+    except (ValueError, TypeError) as exc:
+        logger.debug(f"devicectl device list parse failed: {exc}")
+        return None
+
+
+def is_physical_ios(device: dict[str, Any]) -> bool:
+    """Whether a CoreDevice entry is a physical iPhone/iPad (not a simulator)."""
+    return (
+        device.get("platform") == "iOS"
+        and device.get("reality") == "physical"
+    )
+
+
+def find_physical_ios_device_sync(identifier: str) -> dict[str, Any] | None:
+    """Match a physical iOS device by UDID or exact name, or ``None``."""
+    devices = list_core_devices_sync()
+    if devices is None or not identifier:
+        return None
+    needle = identifier.lower()
+    for device in devices:
+        if not is_physical_ios(device):
+            continue
+        if device.get("udid", "").lower() == needle or device.get("name") == identifier:
+            return device
+    return None
