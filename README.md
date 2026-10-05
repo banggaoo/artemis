@@ -107,10 +107,11 @@ cd artemis
 ### iOS Devices (macOS, Xcode 27+)
 
 CLI, embedded Python SDK, web console, and daemon tasks can target iOS
-simulators and paired physical iPhones/iPads through Xcode's native MCP
-device-interaction tools plus `devicectl` lifecycle on hardware. See the
+simulators through Xcode's native MCP device-interaction tools, and paired
+physical iPhones/iPads through `devicectl` plus a WebDriverAgent runner
+installed on the device. See the
 [iOS setup and usage guide](./docs/ios.md) for prerequisites, Xcode access
-approval, and current limits:
+approval, WDA setup, and current limits:
 
 ```bash
 bash scripts/setup_ios_env.sh
