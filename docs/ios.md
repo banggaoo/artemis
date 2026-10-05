@@ -1,16 +1,18 @@
-# iOS Simulator support
+# iOS support
 
-Artemis can run Flash and Pro tasks on iOS simulators on macOS with Xcode 27 or
-newer. Select iOS explicitly: the existing Android defaults still apply on a
-Mac. iOS tasks work through the CLI, embedded Python SDK, Artemis Daemon task
-queue, Admin Console, and the Artemis MCP tools — including native screen
-recording, video analysis/replay, device discovery, live screen streaming, and
-per-device locking that cannot collide with Android targets.
+Artemis can run Flash and Pro tasks on iOS simulators and on paired physical
+iPhones/iPads on macOS with Xcode 27 or newer. Select iOS explicitly: the
+existing Android defaults still apply on a Mac. iOS tasks work through the CLI,
+embedded Python SDK, Artemis Daemon task queue, Admin Console, and the Artemis
+MCP tools — including native screen recording, video analysis/replay, device
+discovery, live screen streaming, and per-device locking that cannot collide
+with Android targets.
 
-The iOS driver uses tools included with Xcode and Artemis's existing Python MCP
-dependency. It communicates with `xcrun mcpbridge` using an initialized MCP
-session; it uses `xcrun simctl` for simulator and app lifecycle operations.
-Appium, WebDriverAgent, and third-party simulator control utilities are not
+The iOS drivers use tools included with Xcode and Artemis's existing Python MCP
+dependency. They communicate with `xcrun mcpbridge` using an initialized MCP
+session for screen observation and input. Simulators use `xcrun simctl` for
+lifecycle operations; physical devices use `xcrun devicectl` (CoreDevice).
+Appium, WebDriverAgent, and third-party device control utilities are not
 required. Apple added native agent device interactions in Xcode 27; see the
 [Xcode 27 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27-release-notes).
 
@@ -27,7 +29,11 @@ required. Apple added native agent device interactions in Xcode 27; see the
    server introduced in Xcode 27, follow Apple's enablement instructions in the
    [release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27-release-notes).
    Artemis does not enable the server or grant permissions automatically.
-3. Check the toolchain and available simulators from the repository root:
+3. For physical devices: connect the iPhone/iPad over USB (or enable network
+   pairing), tap **Trust** on the device pairing prompt, and enable **Developer
+   Mode** in Settings > Privacy & Security on iOS 16+. `xcrun devicectl list
+   devices` should report the device as `paired` and `connected`.
+4. Check the toolchain and available simulators from the repository root:
 
    ```bash
    bash scripts/setup_ios_env.sh
@@ -37,7 +43,7 @@ required. Apple added native agent device interactions in Xcode 27; see the
    `xcrun mcp-server status`. It does not install dependencies, boot a simulator,
    or change access settings. A passing check confirms prerequisites; the first
    driver connection checks native MCP tool availability and device access.
-4. Install Artemis's Python dependencies and configure a model provider using
+5. Install Artemis's Python dependencies and configure a model provider using
    the normal project configuration:
 
    ```bash
@@ -77,6 +83,36 @@ identifiers, such as `com.apple.Preferences`.
 To install a simulator build before the task, add
 `--app-path /absolute/path/MyApp.app`. The bundle's `Info.plist` must provide
 `CFBundleIdentifier`.
+
+### Physical devices
+
+A paired physical device is selected the same way — by UDID:
+
+```bash
+xcrun devicectl list devices          # find the device UDID
+uv run artemis run "Open Settings" \
+  --platform ios --standalone --device-serial <DEVICE-UDID> --profile flash
+```
+
+Physical UDIDs are routed to a separate driver: `devicectl` handles install,
+launch, terminate, app listing, and URL opening, while the same Xcode
+interaction session supplies screenshots, hierarchy, taps, swipes, and text.
+`booted` remains a simulator-only selector — physical tasks always require an
+explicit `--device-serial`.
+
+Differences from simulators:
+
+- The device must already be paired, trusted, and connected; Artemis never
+  boots or unlocks it. A locked device can be observed but most input fails —
+  unlock it first.
+- `--app-path` expects a device-signed artifact: an `.app` built for an arm64
+  device destination (signed with a valid provisioning profile) or a `.ipa`.
+  Simulator `.app` bundles are x86_64/arm64-simulator builds and cannot be
+  installed on hardware.
+- Screen recording polls `devicectl device capture screenshot` and assembles
+  timestamped MP4 segments (~1–3 fps). There is no `recordVideo`-equivalent
+  stream on hardware, so motion fidelity is lower than simulator captures and
+  brief gaps between frames are expected.
 
 ### First-run Xcode approval
 
@@ -190,24 +226,25 @@ instead of acquiring a second one.
 
 ## Supported operations and limits
 
-| Operation | iOS implementation |
-| --- | --- |
-| Device selection and boot | `simctl` inventory, explicit UDID, `boot`, and `bootstatus` |
-| Screenshot and accessibility hierarchy | Xcode native device-interaction MCP session |
-| Tap, long press, and swipe | Native synthesized touch events |
-| Text entry | Native keyboard synthesis with `clear_exist=false` |
-| Enter, Home, Power, volume, and app switcher | Native keyboard and button synthesis |
-| App install, launch, and terminate | `simctl` using simulator `.app` bundles and bundle identifiers |
+| Operation | Simulator | Physical device |
+| --- | --- | --- |
+| Device selection and readiness | `simctl` inventory, `boot`, `bootstatus` | `devicectl` inventory; must be paired and connected |
+| Screenshot and accessibility hierarchy | Xcode native device-interaction MCP session | Same session (`deviceIsSimulator=false`) |
+| Tap, long press, and swipe | Native synthesized touch events | Same |
+| Text entry | Native keyboard synthesis with `clear_exist=false` | Same |
+| Enter, Home, Power, volume, and app switcher | Native keyboard and button synthesis | Same |
+| App install, launch, and terminate | `simctl` with simulator `.app` bundles | `devicectl` with signed `.app`/`.ipa`; terminate uses the launch PID or a live process scan |
+| Screen recording | `simctl io recordVideo` (VFR H.264) | `devicectl` screenshot polling assembled to timestamped MP4 |
 
 The native hierarchy is normalized into the element tree used by Artemis's
 perception and action tools. Screenshots and touch coordinates are kept in the
 same coordinate space. Custom UI without accessible elements still relies on
 visual targeting.
 
-This driver targets iOS simulators. Physical iPhones and iPads, watchOS, tvOS,
-and visionOS are outside this implementation. Install a simulator build of an
-app; a device `.ipa` or Android `.apk` is not interchangeable with a simulator
-`.app` bundle. The driver does not build Xcode projects.
+watchOS, tvOS, and visionOS are outside this implementation. Install a
+simulator build on simulators and a device-signed build on hardware; neither
+artifact is interchangeable with the other or with an Android `.apk`. The
+drivers do not build Xcode projects.
 
 iOS has no system Back button. Use the app's visible navigation controls.
 The native driver supports `enter`, `home`, `power`, `volume_up`, `volume_down`,
@@ -221,17 +258,20 @@ Android shell commands, Logcat, Android resource identifiers, Android package
 discovery, and the Android Accessibility Helper are unavailable on iOS.
 Platform-specific operations fail explicitly when unsupported.
 
-Screen recording uses the native `xcrun simctl io recordVideo` capture with
-no third-party device automation. Each segment is a variable-frame-rate H.264
-`.mov` anchored to its first captured frame; after recording stops (or when a
-rotation or the duration limit rolls a segment), the bundled FFmpeg post-
-processing finalizes a browser-safe 30 fps MP4 and a `recording.json`
-manifest mapping every segment to its session-time offset. The video analyzer
-can clip the sealed portion of an in-progress recording; request ranges that
-reach past the sealed boundary are clipped with a warning. Limitations: iOS
-capture is silent (no audio), pre-first-frame startup time is not captured,
-and recorder restarts leave a brief gap in the timeline rather than stretching
-recorded frames.
+Screen recording on simulators uses the native `xcrun simctl io recordVideo`
+capture with no third-party device automation. Each segment is a
+variable-frame-rate H.264 `.mov` anchored to its first captured frame; after
+recording stops (or when a rotation or the duration limit rolls a segment),
+the bundled FFmpeg post-processing finalizes a browser-safe 30 fps MP4 and a
+`recording.json` manifest mapping every segment to its session-time offset.
+On physical devices, recording polls `devicectl device capture screenshot`
+into timestamped PNG frames and assembles the same manifest/MP4 output shape
+at the real capture cadence. The video analyzer can clip the sealed portion of
+an in-progress recording; request ranges that reach past the sealed boundary
+are clipped with a warning. Limitations: iOS capture is silent (no audio),
+pre-first-frame startup time is not captured, physical capture runs at ~1–3
+fps rather than continuous video, and recorder restarts leave a brief gap in
+the timeline rather than stretching recorded frames.
 
 ## Troubleshooting
 
@@ -249,6 +289,15 @@ recorded frames.
   inventory is empty.
 - **Multiple booted simulators:** supply `--device-serial` with the intended
   simulator's UDID.
+- **Physical device not found:** confirm `xcrun devicectl list devices` lists
+  it as `paired`; if pairing is absent, reconnect and approve the Trust prompt.
+  A device shown as `disconnected`/offline needs USB reattachment or reachable
+  network pairing.
+- **Physical install fails:** the artifact must be signed for the device —
+  check the signing team and provisioning profile, or build an `.ipa` with
+  `xcodebuild -exportArchive` for the device destination.
+- **Physical input fails on a locked device:** unlock the device; the
+  interaction session cannot inject touches while locked.
 - **A queued iOS task runs on the wrong surface:** confirm the submission
   carried `platform: "ios"` (CLI `--platform ios`, web request `platform`,
   or the MCP `platform` argument); tasks default to Android.

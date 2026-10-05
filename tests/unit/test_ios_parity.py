@@ -286,6 +286,8 @@ def _pool_with_devices(monkeypatch, devices=None):
     module = importlib.import_module("artemis.runtime.ios_device_pool")
     monkeypatch.setattr(module, "list_ios_simulators", AsyncMock(return_value=list(devices)))
     monkeypatch.setattr(module, "list_ios_simulators_sync", lambda: list(devices))
+    monkeypatch.setattr(module, "list_core_devices", AsyncMock(return_value=[]))
+    monkeypatch.setattr(module, "list_core_devices_sync", lambda: [])
     return pool
 
 
@@ -350,6 +352,7 @@ async def test_ios_pool_validate_fails_open_on_enumeration_error(monkeypatch):
 
     module = importlib.import_module("artemis.runtime.ios_device_pool")
     monkeypatch.setattr(module, "list_ios_simulators", AsyncMock(return_value=None))
+    monkeypatch.setattr(module, "list_core_devices", AsyncMock(return_value=None))
     assert await pool.validate_explicit_serial_async("ANY") is None
 
 
@@ -740,6 +743,10 @@ async def test_ios_probe_warns_on_old_xcode(monkeypatch):
         "artemis.core.diagnostics.probes.ios_probe.list_ios_simulators",
         AsyncMock(return_value=SIM_LIST),
     )
+    monkeypatch.setattr(
+        "artemis.core.diagnostics.probes.ios_probe.list_core_devices",
+        AsyncMock(return_value=[]),
+    )
     result = await IosSimulatorProbe().probe()
     assert result.status is ProbeStatus.WARN
     assert result.metadata["xcode_27_or_newer"] is False
@@ -758,6 +765,10 @@ async def test_ios_probe_passes_with_xcode27_and_sims(monkeypatch):
     monkeypatch.setattr(
         "artemis.core.diagnostics.probes.ios_probe.list_ios_simulators",
         AsyncMock(return_value=SIM_LIST),
+    )
+    monkeypatch.setattr(
+        "artemis.core.diagnostics.probes.ios_probe.list_core_devices",
+        AsyncMock(return_value=[]),
     )
     result = await IosSimulatorProbe().probe()
     assert result.status is ProbeStatus.PASS
@@ -780,9 +791,13 @@ async def test_ios_probe_warns_without_simulators(monkeypatch):
         "artemis.core.diagnostics.probes.ios_probe.list_ios_simulators",
         AsyncMock(return_value=[]),
     )
+    monkeypatch.setattr(
+        "artemis.core.diagnostics.probes.ios_probe.list_core_devices",
+        AsyncMock(return_value=[]),
+    )
     result = await IosSimulatorProbe().probe()
     assert result.status is ProbeStatus.WARN
-    assert "No Simulators" in result.summary
+    assert "No Devices" in result.summary
 
 
 def test_ios_probe_registered_in_engine():
