@@ -61,7 +61,23 @@ if ! xcrun mcp-server status; then
     printf 'Could not read MCP server status. Check Xcode MCP access manually.\n' >&2
 fi
 
+if ! devicectl_path=$(xcrun --find devicectl); then
+    fail "The selected Xcode installation does not provide devicectl (needed for physical devices)."
+fi
+printf 'devicectl: %s\n\n' "$devicectl_path"
+
+printf 'Physical devices (devicectl inventory):\n'
+if physical=$(xcrun devicectl list devices 2>/dev/null); then
+    printf '%s\n' "$physical" | awk 'NR > 2 && NF'
+    if ! printf '%s\n' "$physical" | grep -q 'paired'; then
+        printf 'No paired physical devices found. Pair over USB and tap Trust to use hardware.\n'
+    fi
+else
+    printf 'Could not query CoreDevice. Physical-device runs need a paired, connected device.\n' >&2
+fi
+
 printf '\nToolchain and simulator inventory checks passed.\n'
 printf 'Before running Artemis, review and grant Xcode MCP access for your agent.\n'
 printf 'This check does not verify that device-interaction permission is granted.\n'
+printf 'Physical devices additionally need a WebDriverAgent runner installed; see docs/ios.md.\n'
 printf 'See docs/ios.md and https://developer.apple.com/documentation/xcode/giving-external-agents-access-to-xcode\n'

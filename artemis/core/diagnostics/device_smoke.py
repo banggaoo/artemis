@@ -309,8 +309,9 @@ async def smoke_test_device(
 ) -> dict[str, Any]:
     """Observe the device exactly like ``mobile_get_device_state`` and report a verdict.
 
-    ``platform="ios"`` exercises the native Xcode 27 simulator path
-    (``simctl`` + mcpbridge session) instead of ADB/UIAutomator.
+    ``platform="ios"`` exercises the simulator path (``simctl`` + mcpbridge
+    session) when the target is a simulator UDID, or the physical path
+    (``devicectl`` + WebDriverAgent) when the target is paired hardware.
 
     Never raises. Returns::
 
