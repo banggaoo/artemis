@@ -114,16 +114,29 @@ class DeviceStreamService:
         return stdout if proc.returncode == 0 and len(stdout) > 1000 else None
 
     async def _capture_ios(self, udid: str) -> bytes | None:
-        """One PNG frame from the simulator's framebuffer via simctl.
+        """One PNG frame via simctl (simulator) or devicectl (physical).
 
-        ``simctl io screenshot`` only writes files (``-`` is not a stdout
-        sink on Xcode 27), so frames stream through one reused temp path.
+        Both tools only write files, so frames stream through one reused temp
+        path per UDID.
         """
-        # Reused path per UDID: the loop is serialized, and simctl writes the
-        # file itself, so no per-frame temp file churn is needed.
+        from artemis.drivers.ios.discovery import find_physical_ios_device_sync
+
         frame_path = Path(get_temp_dir("streams")) / f"ios_stream_{udid}.png"
-        try:
-            proc = await asyncio.create_subprocess_exec(
+        physical = await asyncio.to_thread(find_physical_ios_device_sync, udid)
+        if physical is not None:
+            cmd = [
+                "xcrun",
+                "devicectl",
+                "device",
+                "capture",
+                "screenshot",
+                "--device",
+                udid,
+                "--destination",
+                str(frame_path),
+            ]
+        else:
+            cmd = [
                 "xcrun",
                 "simctl",
                 "io",
@@ -131,6 +144,10 @@ class DeviceStreamService:
                 "screenshot",
                 "--type=png",
                 str(frame_path),
+            ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
