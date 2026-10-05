@@ -10,14 +10,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""iOS Simulator device pool: discovery, lock status, and target selection.
+"""iOS device pool: simulator and physical discovery, locks, selection.
 
 The iOS counterpart of :class:`~artemis.runtime.device_pool.DevicePool`.
-Enumeration rides ``xcrun simctl list devices``; lock ownership shares the
-same :class:`DeviceExecutionLock` registry under the ``ios`` scope so a
-simulator and an Android serial can never share a lock identity. All methods
-fail open on missing Xcode tooling or an enumeration error, mirroring the
-Android pool's admission contract.
+Enumeration rides ``xcrun simctl list devices`` for simulators and
+``xcrun devicectl list devices`` for paired physical hardware; lock ownership
+shares the same :class:`DeviceExecutionLock` registry under the ``ios`` scope
+so a simulator, a physical device, and an Android serial can never share a
+lock identity. Auto-selection only ever picks simulators — physical hardware
+requires an explicit serial. All methods fail open on missing Xcode tooling
+or an enumeration error, mirroring the Android pool's admission contract.
 """
 
 from __future__ import annotations
@@ -137,19 +139,35 @@ class IosDevicePool:
         return self._build_statuses(raw or []) + self._build_physical_statuses(core or [])
 
     async def validate_explicit_serial_async(self, requested_serial: str) -> str | None:
-        """Reject an explicitly requested UDID, or ``None`` when usable.
+        """Reject an explicitly requested UDID or device name, ``None`` when usable.
 
         Mirrors the Android validator: only a successful, non-empty
-        enumeration may reject. ``Shutdown`` simulators are valid targets —
-        the driver boots them on connect. Physical devices must be paired
-        and connected (``"device"``); offline devices fail here.
+        enumeration may reject, and an enumeration that cannot answer (None)
+        must not reject. ``Shutdown`` simulators are valid targets — the
+        driver boots them on connect. Physical devices must be paired and
+        connected (``"device"``); offline devices fail here.
         """
-        devices = await self.try_list_devices_async()
-        if not devices:
+        raw = await list_ios_simulators()
+        core = await list_core_devices()
+        if raw is None and core is None:
             return None
-        by_udid = {d.serial.lower(): d for d in devices}
-        match = by_udid.get(str(requested_serial).lower())
+        devices = self._build_statuses(raw or []) + self._build_physical_statuses(
+            core or []
+        )
+        needle = str(requested_serial).lower()
+        match = next(
+            (
+                d
+                for d in devices
+                if d.serial.lower() == needle or (d.model or "") == requested_serial
+            ),
+            None,
+        )
         if match is None:
+            # A failed enumeration cannot prove the serial is absent —
+            # defer to the driver's own resolution rather than reject.
+            if raw is None or core is None:
+                return None
             return (
                 f"iOS device '{requested_serial}' is not available. "
                 f"Known devices: {sorted(d.serial for d in devices)}."
@@ -169,7 +187,8 @@ class IosDevicePool:
         """Synchronous validator for non-async admission paths (MCP tools)."""
         devices = list_ios_simulators_sync()
         statuses = {d["udid"].lower(): d.get("state") for d in devices or []}
-        state = statuses.get(str(requested_serial).lower())
+        needle = str(requested_serial).lower()
+        state = statuses.get(needle)
         if state is not None:
             if state != "Booted" and state != "Shutdown":
                 return (
@@ -177,18 +196,26 @@ class IosDevicePool:
                     "and cannot be used."
                 )
             return None
-        physical = {
-            d["udid"].lower(): d
-            for d in list_core_devices_sync() or []
-            if is_physical_ios(d)
-        }
-        match = physical.get(str(requested_serial).lower())
+        core = list_core_devices_sync()
+        physical = [d for d in core or [] if is_physical_ios(d)]
+        match = next(
+            (
+                d
+                for d in physical
+                if str(d.get("udid") or "").lower() == needle
+                or d.get("name") == requested_serial
+            ),
+            None,
+        )
         if match is None:
+            # An enumeration that could not answer must not reject the serial.
+            if devices is None or core is None:
+                return None
             if not statuses and not physical:
                 return None
             return (
                 f"iOS device '{requested_serial}' is not available. "
-                f"Known devices: {sorted([*statuses, *physical])}."
+                f"Known devices: {sorted([*statuses, *[d['udid'] for d in physical]])}."
             )
         if match.get("pairing_state") != "paired":
             return f"iOS device '{requested_serial}' is not paired with this Mac."
@@ -201,18 +228,21 @@ class IosDevicePool:
 
         An explicit serial wins as-is. Otherwise prefer an idle booted
         simulator, then any booted one, then the only available simulator
-        when none are booted (the driver boots it on connect). ``None``
-        when no simulator exists; strict ``booted`` ambiguity rejection is
-        the driver's job for users who literally target "booted".
+        when none are booted (the driver boots it on connect). Physical
+        devices are never auto-selected — hardware always needs an explicit
+        serial. ``None`` when no simulator exists; strict ``booted``
+        ambiguity rejection is the driver's job for users who literally
+        target "booted".
         """
         if preferred_serial:
             return preferred_serial
         devices = await self.try_list_devices_async() or []
-        booted = [d for d in devices if d.state == "device"]
+        simulators = [d for d in devices if d.is_emulator]
+        booted = [d for d in simulators if d.state == "device"]
         if len(booted) == 1:
             return booted[0].serial
-        if not booted and len(devices) == 1:
-            return devices[0].serial
+        if not booted and len(simulators) == 1:
+            return simulators[0].serial
         idle_booted = [d for d in booted if not d.is_busy]
         return idle_booted[0].serial if idle_booted else (booted[0].serial if booted else None)
 

@@ -372,6 +372,48 @@ async def test_ios_pool_select_device_prefers_booted_and_idle(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ios_pool_select_device_never_picks_physical(monkeypatch):
+    """Auto-selection must never target paired hardware without an explicit serial."""
+    import importlib
+
+    physical = {
+        "udid": "00008130-0000ABCD1234FFFF",
+        "name": "Test iPhone",
+        "reality": "physical",
+        "platform": "iOS",
+        "pairing_state": "paired",
+        "connection_state": "connected",
+        "os_version": "26.0",
+    }
+    module = importlib.import_module("artemis.runtime.ios_device_pool")
+    pool = IosDevicePool()
+
+    # Physical alone: nothing to auto-pick.
+    monkeypatch.setattr(module, "list_ios_simulators", AsyncMock(return_value=[]))
+    monkeypatch.setattr(module, "list_core_devices", AsyncMock(return_value=[physical]))
+    assert await pool.select_device_async() is None
+
+    # Physical alongside one booted sim: only the sim is eligible.
+    monkeypatch.setattr(module, "list_ios_simulators", AsyncMock(return_value=list(SIM_LIST)))
+    assert await pool.select_device_async() == "AAAA-1111"
+
+    # Explicit serial still passes through untouched.
+    assert await pool.select_device_async(preferred_serial=physical["udid"]) == physical["udid"]
+
+
+@pytest.mark.asyncio
+async def test_ios_pool_validate_fails_open_on_partial_enumeration(monkeypatch):
+    """A dead devicectl enumeration cannot disprove a physical serial."""
+    import importlib
+
+    module = importlib.import_module("artemis.runtime.ios_device_pool")
+    pool = IosDevicePool()
+    monkeypatch.setattr(module, "list_ios_simulators", AsyncMock(return_value=list(SIM_LIST)))
+    monkeypatch.setattr(module, "list_core_devices", AsyncMock(return_value=None))
+    assert await pool.validate_explicit_serial_async("00008130-0000ABCD1234FFFF") is None
+
+
+@pytest.mark.asyncio
 async def test_ios_pool_select_device_boots_single_shutdown_sim(monkeypatch):
     pool = _pool_with_devices(monkeypatch, [d for d in SIM_LIST if d["udid"] == "BBBB-2222"])
     assert await pool.select_device_async() == "BBBB-2222"

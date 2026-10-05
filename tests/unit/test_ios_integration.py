@@ -502,7 +502,7 @@ def test_flash_and_pro_prompts_teach_ios_constraints(native_driver):
     prompts = {"main_template": PLAN_HISTORY_TEMPLATE_SECTION + "\n# CURRENT OBSERVATION"}
     pro = render_transcript_static_system(prompts, context, State.initial("Open Settings"))
     for prompt in (flash, pro):
-        assert "iOS Simulator" in prompt
+        assert "Target platform: iOS." in prompt
         assert "clear_exist=false" in prompt
         assert (
             "press_key supports enter, home, "

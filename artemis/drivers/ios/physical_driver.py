@@ -28,6 +28,7 @@ set ``ARTEMIS_IOS_WDA_URL`` to reach an existing server directly.
 
 import asyncio
 import base64
+import contextlib
 from io import BytesIO
 import json
 import os
@@ -158,7 +159,10 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
             raise RuntimeError(
                 f"iOS device {self._device_id} is not paired. Connect it and tap Trust."
             )
-        if candidate.get("connection_state") != "connected":
+        connection_state = candidate.get("connection_state")
+        # Older iOS versions over USB expose no CoreDevice tunnelState — an
+        # absent value on a paired device is acceptable; "disconnected" is not.
+        if connection_state is not None and connection_state != "connected":
             raise RuntimeError(
                 f"iOS device {self._device_id} ({candidate.get('name') or 'unknown'}) is not "
                 "connected. Attach it over USB or ensure network pairing is reachable; "
@@ -175,13 +179,9 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                 self._wda = await self._ensure_wda()
                 self._session_key = await self._wda.open_session()
                 await self.get_screen_data(skip_settling=True)
-            except (
-                OSError,
-                ValueError,
-                RuntimeError,
-                TimeoutError,
-                asyncio.CancelledError,
-            ):
+            # Any failure here must release a half-started WDA runner,
+            # xcodebuild session, or server-side session.
+            except (Exception, asyncio.CancelledError):
                 try:
                     await self.disconnect()
                 except (OSError, ValueError, RuntimeError, TimeoutError) as cleanup_error:
@@ -196,29 +196,33 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
             if self._physical_recorder is not None:
                 session = self._physical_recorder.session
                 if session is not None:
-                    if session.is_active:
-                        try:
-                            await self._physical_recorder.stop()
-                        except Exception as exc:
-                            logger.error(
-                                f"Physical iOS recording finalization failed during disconnect: {exc}"
-                            )
+                    # A failed (non-active) session still owns frames and
+                    # conversions — finalize it too so nothing is lost.
+                    try:
+                        await self._physical_recorder.stop()
+                    except Exception as exc:
+                        logger.error(
+                            f"Physical iOS recording finalization failed during disconnect: {exc}"
+                        )
                     if get_active_session(self._device_id) is session:
                         remove_active_session(self._device_id)
         finally:
             async with self._operation_lock:
                 self._session_key = None
+                self._scale = None
+                self._launched_pids.clear()
                 client, self._wda = self._wda, None
                 runner_pid, self._wda_runner_pid = self._wda_runner_pid, None
                 test_process, self._wda_test_process = self._wda_test_process, None
             if client is not None:
                 await client.close_session()
             if test_process is not None and test_process.returncode is None:
-                test_process.terminate()
                 try:
+                    test_process.terminate()
                     await asyncio.wait_for(test_process.wait(), timeout=10.0)
-                except (TimeoutError, asyncio.TimeoutError):
-                    test_process.kill()
+                except (TimeoutError, OSError):
+                    with contextlib.suppress(OSError):
+                        test_process.kill()
             if runner_pid is not None:
                 try:
                     await self._terminate_pid(runner_pid)
@@ -243,36 +247,45 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         client = await probe_wda(candidates)
         if client is not None:
             return client
-        runner = await self._wda_runner_bundle()
-        if runner is not None:
-            self._wda_runner_pid = await self._launch_bundle(
-                runner, terminate_existing=False
-            )
-            logger.info(
-                f"Launched WebDriverAgent runner {runner} on {self._device_id}; "
-                "waiting for its HTTP server"
-            )
         xctestrun = os.environ.get(WDA_XCTESTRUN_ENV)
+        runner = await self._wda_runner_bundle()
+        if xctestrun:
+            await self._start_xctest_session(xctestrun)
+        elif runner is not None:
+            try:
+                self._wda_runner_pid = await self._launch_bundle(
+                    runner, terminate_existing=False
+                )
+                logger.info(
+                    f"Launched WebDriverAgent runner {runner} on {self._device_id}; "
+                    "waiting for its HTTP server"
+                )
+            except (OSError, RuntimeError, TimeoutError) as exc:
+                # A stale runner may already be hosting the server — the
+                # probe loop below still gets a chance to attach.
+                logger.debug(f"WDA runner launch failed ({runner}): {exc}")
         if runner is None and not xctestrun:
             raise RuntimeError(
                 f"No WebDriverAgent server answers on {self._device_id} and no WDA "
                 f"runner is installed. {_WDA_SETUP_HINT}"
             )
-        if xctestrun:
-            await self._start_xctest_session(xctestrun)
         deadline = asyncio.get_running_loop().time() + WDA_START_TIMEOUT
         while True:
-            client = await probe_wda(candidates)
-            if client is not None:
-                return client
-            if asyncio.get_running_loop().time() >= deadline:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
                 raise RuntimeError(
                     f"WebDriverAgent did not answer within {WDA_START_TIMEOUT:.0f}s "
                     f"on {self._device_id} at {candidates}. If the device is showing "
                     "a passcode prompt to enable UI Automation, enter it on the "
                     f"device first. {_WDA_SETUP_HINT}"
                 )
-            await asyncio.sleep(1.0)
+            client = await probe_wda(candidates, timeout=min(5.0, remaining))
+            if client is not None:
+                logger.info(
+                    f"WebDriverAgent attached at {client.base_url} for {self._device_id}"
+                )
+                return client
+            await asyncio.sleep(min(1.0, remaining))
 
     async def _start_xctest_session(self, xctestrun: str) -> None:
         """Hold WDA alive through ``xcodebuild test-without-building``."""
@@ -301,9 +314,21 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
             details = await self._devicectl_json("info", "details")
         except (OSError, RuntimeError, TimeoutError, ValueError):
             return None
-        connection = details.get("properties", {}).get("connection", {})
-        address = connection.get("tunnelIPAddressString")
-        return address if isinstance(address, str) and address else None
+        # The tunnel address has moved across Xcode releases: probe every
+        # observed shape, canonical first.
+        paths = (
+            ((details.get("connectionProperties") or {}), "tunnelIPAddress"),
+            (
+                ((details.get("properties") or {}).get("connection") or {}),
+                "tunnelIPAddressString",
+            ),
+            ((details.get("tunnel") or {}), "ipAddress"),
+        )
+        for section, key in paths:
+            address = section.get(key)
+            if isinstance(address, str) and ":" in address:
+                return address
+        return None
 
     async def _wda_runner_bundle(self) -> str | None:
         override = os.environ.get(WDA_BUNDLE_ENV)
@@ -403,7 +428,18 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                 "The device screenshot and hierarchy disagree on orientation. "
                 "Capture again after the rotation settles."
             )
-        self._scale = (self._width / win_w, self._height / win_h)
+        scale = (self._width / win_w, self._height / win_h)
+        if not (0.9 <= scale[0] <= 4.5 and 0.9 <= scale[1] <= 4.5):
+            # iOS displays render at 1x-3x; a wildly off scale means the WDA
+            # window is not full-screen (e.g. iPad multitasking) and every
+            # element bound would be wrong.
+            self._scale = None
+            raise RuntimeError(
+                f"WebDriverAgent window {win_w}x{win_h} does not match the "
+                f"{self._width}x{self._height} framebuffer (scale {scale}); "
+                "bring the session app full-screen before interacting."
+            )
+        self._scale = scale
         tree = await self._wda.source_json()
         elements = parse_wda_elements(
             tree, self._scale, self._width, self._height
@@ -581,6 +617,15 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         match = re.search(r"pid[:= ]+(\d+)", raw.decode(errors="replace"))
         return int(match.group(1)) if match else None
 
+    @staticmethod
+    def _normalize_executable(raw: Any) -> str:
+        """devicectl reports executables as file:// URLs or paths; normalize."""
+        value = raw if isinstance(raw, str) else str(raw or "")
+        if isinstance(raw, dict):
+            value = str(raw.get("url") or raw.get("path") or "")
+        value = value.removeprefix("file://")
+        return value.removeprefix("/private") or value
+
     async def _resolve_pid(self, package_name: str) -> int:
         """Find a running process id for the bundle, tracking launches first."""
         tracked = self._launched_pids.get(package_name)
@@ -590,19 +635,26 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
             apps = await self._devicectl_json("info", "apps")
             url_prefix = ""
             for app in apps.get("apps", []):
-                if app.get("bundleIdentifier") == package_name:
-                    url_prefix = str(app.get("url") or "").rstrip("/")
+                if isinstance(app, dict) and app.get("bundleIdentifier") == package_name:
+                    url_prefix = self._normalize_executable(app.get("url")).rstrip("/")
                     break
             processes = await self._devicectl_json("info", "processes")
             for process in processes.get("runningProcesses", []):
-                executable = str(process.get("executable") or "")
+                if not isinstance(process, dict):
+                    continue
+                executable = self._normalize_executable(process.get("executable"))
                 matched = (
                     executable.startswith(url_prefix)
                     if url_prefix
                     else package_name in executable
                 )
-                if matched and isinstance(process.get("processIdentifier"), int):
-                    return process["processIdentifier"]
+                pid = (
+                    process.get("processIdentifier")
+                    or process.get("pid")
+                    or process.get("processID")
+                )
+                if matched and isinstance(pid, int):
+                    return pid
         except (OSError, RuntimeError, TimeoutError, ValueError, TypeError) as exc:
             logger.debug(f"devicectl process enumeration failed: {exc}")
         raise ValueError(
@@ -610,8 +662,8 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
             "launch it with launch_app before stopping."
         )
 
-    async def _terminate_pid(self, pid: int) -> None:
-        await run_xcrun(
+    async def _terminate_pid(self, pid: int, kill: bool = False) -> None:
+        arguments = [
             "devicectl",
             "device",
             "process",
@@ -620,26 +672,34 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
             self._device_id,
             "--pid",
             str(pid),
-            timeout=DEVICECTL_QUERY_TIMEOUT,
-        )
+        ]
+        if kill:
+            arguments.append("--kill")
+        await run_xcrun(*arguments, timeout=DEVICECTL_QUERY_TIMEOUT)
 
     async def stop_app(self, package_name: str) -> bool:
         async with self._operation_lock:
             self._require_connected()
+            tracked = self._launched_pids.pop(package_name, None)
+            if tracked is not None:
+                try:
+                    await self._terminate_pid(tracked, kill=True)
+                    return True
+                except (OSError, RuntimeError, TimeoutError) as exc:
+                    # A stale or recycled PID must not poison stop_app —
+                    # fall through to the live process scan.
+                    logger.debug(f"Tracked-PID terminate failed for {package_name}: {exc}")
             pid = await self._resolve_pid(package_name)
-            await self._terminate_pid(pid)
-            self._launched_pids.pop(package_name, None)
+            await self._terminate_pid(pid, kill=True)
         return True
 
     async def install_app(self, app_path: Path) -> str:
         self._require_connected()
         path = app_path.expanduser().resolve()
-        if path.suffix == ".ipa":
+        if path.suffix.lower() == ".ipa":
             if not path.is_file():
                 raise ValueError("iOS installation requires an existing .ipa file.")
-            # The bundle id lives inside the archive; the filename stem is the
-            # best available label until the app is installed and listed.
-            bundle = path.stem
+            bundle = self._ipa_bundle_id(path) or path.stem
         elif path.suffix == ".app" and path.is_dir():
             with (path / "Info.plist").open("rb") as stream:
                 bundle = plistlib.load(stream).get("CFBundleIdentifier")
@@ -663,6 +723,22 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                 timeout=DEVICECTL_INSTALL_TIMEOUT,
             )
         return bundle
+
+    @staticmethod
+    def _ipa_bundle_id(path: Path) -> str | None:
+        """Read CFBundleIdentifier from an IPA's embedded app Info.plist."""
+        import zipfile
+
+        try:
+            with zipfile.ZipFile(path) as archive:
+                for name in archive.namelist():
+                    if name.startswith("Payload/") and name.endswith(".app/Info.plist"):
+                        with archive.open(name) as stream:
+                            bundle = plistlib.load(stream).get("CFBundleIdentifier")
+                        return bundle if isinstance(bundle, str) and bundle else None
+        except (OSError, zipfile.BadZipFile, KeyError, plistlib.InvalidFileException):
+            return None
+        return None
 
     async def list_apps(self) -> dict[str, str]:
         async with self._operation_lock:

@@ -122,7 +122,7 @@ async def run_task(request: RunRequest):
     if platform == "ios" and request.locked_app_package:
         raise HTTPException(
             status_code=400,
-            detail="locked_app_package is unavailable for iOS simulator tasks.",
+            detail="locked_app_package is unavailable for iOS tasks.",
         )
 
     # Reject an explicit unknown/offline target before running the more
@@ -223,7 +223,7 @@ async def get_run_defaults():
 
 @router.get("/api/devices")
 async def list_devices():
-    """List all connected devices (Android + iOS simulators) with lock status."""
+    """List all connected devices (Android + iOS) with lock status."""
     android_devices, ios_devices = await asyncio.gather(
         device_pool.list_devices_async(), ios_device_pool.list_devices_async()
     )

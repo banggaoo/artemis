@@ -15,7 +15,7 @@
 """Device Live Screen Streaming Service.
 
 Provides real-time, low-latency device screen frames over HTTP MJPEG and WebSocket.
-Android frames come from ``adb exec-out screencap``; iOS Simulator frames come
+Android frames come from ``adb exec-out screencap``; iOS frames come
 from the native ``xcrun simctl io <UDID> screenshot`` capture. The target is
 picked per frame so the stream follows whichever platform is under automation.
 """
@@ -49,7 +49,7 @@ class DeviceStreamService:
     async def get_stream_target(self) -> dict[str, str] | None:
         """Pick the device the stream should follow right now.
 
-        An actively locked iOS simulator wins (it is the device under
+        An actively locked iOS device wins (it is the device under
         automation), then a connected Android device, then the single
         unambiguous booted simulator. Returns ``{"platform", "serial"}``.
         """

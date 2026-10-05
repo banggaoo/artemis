@@ -35,16 +35,17 @@ see the
 3. For physical devices: connect the iPhone/iPad over USB (or enable network
    pairing), tap **Trust** on the device pairing prompt, and enable **Developer
    Mode** in Settings > Privacy & Security on iOS 16+. `xcrun devicectl list
-   devices` should report the device as `paired` and `connected`.
+   devices` should show the device `connected` (or `available (paired)`); the
+   JSON fields are `pairingState: paired` and `tunnelState: connected`.
 4. Check the toolchain and available simulators from the repository root:
 
    ```bash
    bash scripts/setup_ios_env.sh
    ```
 
-   This check reads the Xcode version, tool locations, simulator inventory, and
-   `xcrun mcp-server status`. It does not install dependencies, boot a simulator,
-   or change access settings. A passing check confirms prerequisites; the first
+   This check reads the Xcode version, tool locations, simulator and
+   physical-device (`devicectl`) inventories, and `xcrun mcp-server status`. It
+   does not install dependencies, boot a simulator, or change access settings. A passing check confirms prerequisites; the first
    driver connection checks native MCP tool availability and device access.
 5. Install Artemis's Python dependencies and configure a model provider using
    the normal project configuration:
@@ -124,7 +125,7 @@ Any Apple development team works; a free Personal Team profile must be
 re-signed every 7 days while paid-program profiles last a year.
 
 When Artemis connects, it finds an installed `*WebDriverAgent*` runner on the
-device, launches it via `devicectl process launch`, and probes its HTTP
+device, launches it via `devicectl device process launch`, and probes its HTTP
 endpoint on the CoreDevice tunnel address and `127.0.0.1:8100` (for
 `iproxy`/`pymobiledevice3` port forwards). Endpoint overrides:
 
@@ -132,12 +133,17 @@ endpoint on the CoreDevice tunnel address and `127.0.0.1:8100` (for
   `http://<device-LAN-ip>:8100`
 - `ARTEMIS_IOS_WDA_HOST` — host only; port 8100 assumed
 - `ARTEMIS_IOS_WDA_BUNDLE_ID` — nonstandard runner bundle identifier
+- `ARTEMIS_IOS_WDA_XCTESTRUN` — path to a `WebDriverAgentRunner_*.xctestrun`
+  bundle from `xcodebuild build-for-testing`; Artemis hosts it via
+  `xcodebuild test-without-building` (the canonical WDA session — a bare
+  runner app launch does not start the HTTP server)
 
 Differences from simulators:
 
 - The device must already be paired, trusted, and connected; Artemis never
-  boots or unlocks it. A locked device can be observed but most input fails —
-  unlock it first.
+  boots or unlocks it — unlock the device before connecting, since WDA cannot
+  inject touches while it is locked. The first XCTest attach may also show an
+  on-device "Enable UI Automation" passcode prompt; approve it once.
 - `--app-path` expects a device-signed artifact: an `.app` built for an arm64
   device destination (signed with a valid provisioning profile) or a `.ipa`.
   Simulator `.app` bundles are x86_64/arm64-simulator builds and cannot be
@@ -222,19 +228,22 @@ probe is involved. `artemis batch` accepts the same `--platform`,
 
 The Admin Console `/api/run` accepts `platform: "ios"`, a simulator UDID in
 `device_serial`, and an optional `ios_workspace`; `/api/devices` lists Android
-devices and iOS simulators together, each tagged with its `platform`. The live
-screen view (`/api/stream/device-live`) streams simulator frames captured with
-`simctl io screenshot` when an iOS task holds the lock or a simulator is the
-only viable target; `/api/stream/device-state` reports the `platform` of the
-streamed device. Replay preserves the recorded session's `mobile_platform`, so
-an iOS trace replays through the Xcode driver on a simulator (the device
-picker retargets iOS replays to a chosen UDID).
+devices and iOS devices (simulators and paired physical hardware) together,
+each tagged with its `platform`. The live screen view
+(`/api/stream/device-live`) streams frames captured with `simctl io
+screenshot` for simulators or `devicectl capture screenshot` for physical
+devices when an iOS task holds the lock; `/api/stream/device-state` reports
+the `platform` of the streamed device. Replay preserves the recorded session's
+`mobile_platform`, so an iOS trace replays through the native iOS driver (the
+device picker retargets iOS replays to a chosen UDID — simulator or paired
+physical).
 
 `mobile_run_task` accepts `platform="ios"`, `device_serial=<UDID>`, and
-`ios_workspace=<path>`; it validates the UDID against `simctl` rather than ADB
-and queues the runner under the `ios` lock scope. `mobile_get_device_state`
-and `mobile_diagnose` accept the same `platform` switch — the latter runs a
-native screenshot/hierarchy smoke test on the simulator. The legacy
+`ios_workspace=<path>`; it validates the UDID against the `simctl` and
+`devicectl` inventories rather than ADB and queues the runner under the `ios`
+lock scope. `mobile_get_device_state` and `mobile_diagnose` accept the same
+`platform` switch — the latter runs a native screenshot/hierarchy smoke test
+on the selected iOS device. The legacy
 `Android_ADB_Controller` actuator server (tap/swipe/type tools) remains
 Android-only.
 
@@ -265,7 +274,7 @@ instead of acquiring a second one.
 | Screenshot and accessibility hierarchy | Xcode native device-interaction MCP session | WDA `/source` and `/screenshot` (devicectl screenshot fallback) |
 | Tap, long press, and swipe | Native synthesized touch events | WDA W3C pointer actions |
 | Text entry | Native keyboard synthesis with `clear_exist=false` | WDA `/wda/keys`, `clear_exist=false` |
-| Enter, Home, Power, volume, and app switcher | Native keyboard and button synthesis | WDA `/wda/homescreen` and `/wda/pressButton` |
+| Enter, Home, Power, volume, and app switcher | Native keyboard and button synthesis | WDA `/wda/keys` (Enter), `/wda/homescreen`, and `/wda/pressButton` |
 | App install, launch, and terminate | `simctl` with simulator `.app` bundles | `devicectl` with signed `.app`/`.ipa`; terminate uses the launch PID or a live process scan |
 | Screen recording | `simctl io recordVideo` (VFR H.264) | `devicectl` screenshot polling assembled to timestamped MP4 |
 

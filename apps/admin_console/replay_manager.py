@@ -1649,10 +1649,11 @@ class ReplayManager:
         """Build the simulated ``DeviceContext`` for a replayed session.
 
         The recorded session decides the platform: an iOS session replays
-        through the Xcode driver against a simulator, never through ADB. The
-        frontend's device pick only retargets iOS replays (the picker was
-        always decorative for Android and stays that way); the driver still
-        validates the UDID against simctl at connect time.
+        through the native iOS driver, never through ADB. The frontend's
+        device pick only retargets iOS replays (the picker was always
+        decorative for Android and stays that way); the driver still
+        validates the UDID — simctl for simulators, devicectl for physical
+        devices — at connect time.
         """
         from artemis.context import DeviceContext, DevicePlatform
 
