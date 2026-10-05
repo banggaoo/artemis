@@ -30,6 +30,8 @@ Reaching the device-side server needs one of:
 
 import asyncio
 import base64
+import http.client
+import ipaddress
 import json
 import os
 from typing import Any
@@ -86,7 +88,9 @@ class WdaClient:
         except urllib.error.HTTPError as error:
             detail = error.read().decode(errors="replace")[:500]
             raise RuntimeError(f"WebDriverAgent {method} {path} failed: HTTP {error.code} {detail}")
-        except (urllib.error.URLError, TimeoutError, OSError) as error:
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as error:
+            # HTTPException covers garbage services answering probed ports —
+            # BadStatusLine is not an OSError, so it needs mapping here.
             raise WdaUnavailableError(
                 f"WebDriverAgent at {self._base} is unreachable: {error}. "
                 "Check the device connection, the WDA runner process, and any "
@@ -139,7 +143,9 @@ class WdaClient:
             if session_id is None and isinstance(value.get("capabilities"), dict):
                 session_id = value.get("capabilities", {}).get("sessionId")
         if not isinstance(session_id, str) or not session_id:
-            raise RuntimeError("WebDriverAgent did not return a session id.")
+            raise RuntimeError(
+                f"WebDriverAgent did not return a session id (response: {value!r:.300})."
+            )
         self._session_id = session_id
         return session_id
 
@@ -243,7 +249,11 @@ class WdaClient:
                 "POST", f"/session/{session}/wda/pressButton", {"name": name}
             )
             return True
-        except (RuntimeError, WdaUnavailableError):
+        except WdaUnavailableError:
+            # The transport died — propagate so callers don't misreport an
+            # outage as an unsupported button.
+            raise
+        except RuntimeError:
             return False
 
     async def homescreen(self) -> None:
@@ -262,9 +272,20 @@ def normalize_wda_url(raw: str) -> str:
     if not value:
         return value
     if "://" not in value:
-        # Bare IPv6 literals need brackets once a port is attached.
+        # Bare IPv6 literals need brackets once a port is attached. A bare
+        # "v6:port" string is ambiguous — treat the last group as a port only
+        # when the address part parses as a real IPv6 literal.
         if value.count(":") > 1 and not value.startswith("["):
-            value = f"[{value}]"
+            try:
+                ipaddress.IPv6Address(value)
+                value = f"[{value}]"
+            except ValueError:
+                address, _, port = value.rpartition(":")
+                try:
+                    ipaddress.IPv6Address(address)
+                    value = f"[{address}]:{port}"
+                except ValueError:
+                    value = f"[{value}]"
         value = f"http://{value}"
     value = value.rstrip("/")
     authority = value.split("://", 1)[1]
@@ -290,7 +311,9 @@ def wda_url_candidates(
     for raw in (
         env_url if env_url is not None else os.environ.get(WDA_URL_ENV),
         env_host if env_host is not None else os.environ.get(WDA_HOST_ENV),
-        f"[{tunnel_ip}]:{WDA_DEFAULT_PORT}" if tunnel_ip else None,
+        (f"[{tunnel_ip}]:{WDA_DEFAULT_PORT}" if ":" in tunnel_ip else f"{tunnel_ip}:{WDA_DEFAULT_PORT}")
+        if tunnel_ip
+        else None,
         f"127.0.0.1:{WDA_DEFAULT_PORT}",
     ):
         if not raw:
@@ -333,12 +356,12 @@ def parse_wda_elements(
 
     def visit(entry: dict[str, Any]) -> None:
         rect = entry.get("rect")
-        if isinstance(rect, dict):
+        try:
             x = float(rect.get("x") or 0.0)
             y = float(rect.get("y") or 0.0)
             w = float(rect.get("width") or 0.0)
             h = float(rect.get("height") or 0.0)
-        else:
+        except (TypeError, ValueError, AttributeError):
             x = y = w = h = 0.0
         if w > 0 and h > 0:
             left, top = round(x * scale[0]), round(y * scale[1])

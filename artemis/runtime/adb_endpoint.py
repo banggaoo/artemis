@@ -180,6 +180,7 @@ class IosTarget:
         target[ADB_ENDPOINT_ID_ENV] = self.lock_scope
         # An iOS worker never touches ADB: a stale serial must not leak in.
         target.pop("ADB_DEVICE_SERIAL", None)
+        target.pop("ARTEMIS_DEVICE_ID", None)
         return target
 
     def to_dict(self) -> dict[str, Any]:

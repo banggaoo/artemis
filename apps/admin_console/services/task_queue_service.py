@@ -1084,8 +1084,8 @@ class TaskQueueService:
         forwarded to the worker as ``--verification-level`` / ``--explorer-pro-mode``;
         they are normalised here so the queue item and the CLI see one spelling.
 
-        ``platform="ios"`` enqueues a native iOS Simulator task: the serial is a
-        simulator UDID, the device lock is scoped under ``ios``, and the worker
+        ``platform="ios"`` enqueues a native iOS task: the serial is a simulator
+        or paired physical UDID, the device lock is scoped under ``ios``, and the worker
         runs with ``--platform ios`` instead of ADB bindings.
         """
         platform = str(platform or "android").strip().lower() or "android"

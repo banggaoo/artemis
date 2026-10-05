@@ -10,13 +10,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared ``simctl`` device enumeration for iOS Simulator support.
+"""Shared iOS device enumeration: ``simctl`` for simulators, ``devicectl`` for physical.
 
 Both the Xcode driver (target validation) and the runtime pools (discovery,
 explicit-serial validation, auto-selection) read the same
 ``xcrun simctl list devices --json`` output through this module so parsing
-stays in one place. Every function fails closed to ``None``/``[]`` on
-missing tooling so Android-only hosts never see iOS errors.
+stays in one place; paired physical hardware is enumerated through
+``xcrun devicectl list devices``. Every function fails closed to
+``None``/``[]`` on missing tooling so Android-only hosts never see iOS errors.
 """
 
 import asyncio
@@ -197,17 +198,31 @@ def _device_property(device: dict[str, Any], section: str, key: str) -> Any:
 
     Xcode marks ``hardwareProperties``/``deviceProperties``/``connectionProperties``
     deprecated in favor of a nested ``properties`` dictionary; accept both.
+    Sections may be present-but-null, so guard every hop.
     """
-    value = device.get(section, {}).get(key)
+    parent = device.get(section)
+    value = parent.get(key) if isinstance(parent, dict) else None
     if value is not None:
         return value
-    return device.get("properties", {}).get(section, {}).get(key)
+    properties = device.get("properties")
+    if not isinstance(properties, dict):
+        return None
+    nested = properties.get(section)
+    return nested.get(key) if isinstance(nested, dict) else None
 
 
 def parse_devicectl_devices(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Flatten ``devicectl list devices --json-output -`` into device entries."""
     devices = []
-    for device in payload.get("result", {}).get("devices", []):
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return devices
+    entries = result.get("devices")
+    if not isinstance(entries, list):
+        return devices
+    for device in entries:
+        if not isinstance(device, dict):
+            continue
         udid = _device_property(device, "hardwareProperties", "udid")
         if not udid:
             continue
@@ -292,7 +307,7 @@ def list_core_devices_sync(
 def is_physical_ios(device: dict[str, Any]) -> bool:
     """Whether a CoreDevice entry is a physical iPhone/iPad (not a simulator)."""
     return (
-        device.get("platform") == "iOS"
+        device.get("platform") in ("iOS", "iPadOS")
         and device.get("reality") == "physical"
     )
 

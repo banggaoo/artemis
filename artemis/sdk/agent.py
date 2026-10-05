@@ -144,7 +144,7 @@ class Agent(AgentBase):
         if self._config.device_platform != DevicePlatform.IOS:
             return await super()._init_internal(api_key, retry_count, retry_wait_seconds)
         if os.environ.get("ARTEMIS_CLOUD_MODE") == "1":
-            raise AgentError("iOS Simulator support is local only; cloud mode targets Android.")
+            raise AgentError("iOS support is local only; cloud mode targets Android.")
         if self._initialized:
             return True
         from artemis.drivers.factory import ios_driver_class
@@ -152,7 +152,12 @@ class Agent(AgentBase):
         publish_startup_progress(
             "device_check", "Checking the iOS device", session_id=self._session_id
         )
-        driver = ios_driver_class(self._config.device_id or "booted")(
+        # The picker runs simctl/devicectl subprocesses — keep them off the
+        # event loop so init timeouts and progress stays responsive.
+        driver_class = await asyncio.to_thread(
+            ios_driver_class, self._config.device_id or "booted"
+        )
+        driver = driver_class(
             device_id=self._config.device_id or "booted",
             workspace_path=getattr(self._config, "ios_workspace_path", None),
         )

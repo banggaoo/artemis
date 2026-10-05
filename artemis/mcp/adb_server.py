@@ -118,8 +118,8 @@ _CONTROLLERS: dict[str, Any] = {}
 def _get_controller(device_serial: str | None = None, target_platform: str | None = None):
     """Lazy-load device controller on-demand, caching per device serial.
 
-    ``target_platform="ios"`` builds a native iOS Simulator controller: the
-    serial is a simulator UDID (or "booted"), the context carries
+    ``target_platform="ios"`` builds a native iOS controller: the serial is a
+    simulator UDID (or "booted") or a paired physical device UDID, the context carries
     ``DevicePlatform.IOS`` so the factory selects the Xcode driver, and the
     cache key is namespaced so a UDID can never collide with an Android
     serial. Callers must ``await driver.connect()`` before interacting --

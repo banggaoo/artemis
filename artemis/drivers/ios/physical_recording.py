@@ -44,6 +44,9 @@ WATCHDOG_INTERVAL_SECONDS = 0.5
 MAX_CONSECUTIVE_FAILURES = 5
 
 
+FFMPEG_TIMEOUT_SECONDS = 300.0
+
+
 async def _run_ffmpeg(arguments: list[str]) -> tuple[int, bytes]:
     """Seam for segment assembly so tests can intercept the ffmpeg process."""
     process = await asyncio.create_subprocess_exec(
@@ -53,7 +56,14 @@ async def _run_ffmpeg(arguments: list[str]) -> tuple[int, bytes]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _stdout, stderr = await process.communicate()
+    try:
+        _stdout, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=FFMPEG_TIMEOUT_SECONDS
+        )
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        return -1, b"ffmpeg timed out"
     return process.returncode, stderr
 
 
@@ -131,7 +141,10 @@ class PhysicalIosRecorder:
                         self._consecutive_failures = 0
                     except asyncio.CancelledError:
                         raise
-                    except (OSError, RuntimeError, TimeoutError) as exc:
+                    except Exception as exc:
+                        # Count any unexpected failure (PIL errors, devicectl
+                        # surprises) toward the limit so the loop can never
+                        # die silently with the session still active.
                         failed = True
                         self._consecutive_failures += 1
                         session.errors.append(f"Frame capture failed: {exc}")
@@ -149,7 +162,9 @@ class PhysicalIosRecorder:
     async def _start_segment(self, session: IosPhysicalRecordingSession) -> None:
         assert self._output_dir is not None
         session.frames = []
-        session.frame_index = 0
+        # frame_index stays monotonic for the whole session: rolled leftover
+        # frames keep their original names in the new segment directory, so a
+        # fresh index range can never collide with them.
         session.capture_width = session.capture_height = None
         session.segment_started_monotonic = None
         session.frames_dir = self._output_dir / f"frames_{session.segment_index:04d}"
@@ -216,9 +231,9 @@ class PhysicalIosRecorder:
         width = max(2, int(record["width"] or 1080)) // 2 * 2
         height = max(2, int(record["height"] or 1920)) // 2 * 2
         temporary = output.with_name(f"{output.stem}.part.mp4")
-        if temporary.exists():
-            temporary.unlink()
         try:
+            if temporary.exists():
+                temporary.unlink()
             concat = self._write_concat(session, record)
             returncode, stderr = await _run_ffmpeg(
                 [
@@ -267,8 +282,11 @@ class PhysicalIosRecorder:
         except OSError as exc:
             record["conversion_error"] = str(exc)
             logger.error(f"Physical iOS recording finalization failed: {exc}")
-        if temporary.exists():
-            temporary.unlink()
+        try:
+            if temporary.exists():
+                temporary.unlink()
+        except OSError:
+            pass
         session.errors.append(
             f"Segment {record['output_path']} failed finalization; frames kept"
         )
@@ -303,6 +321,13 @@ class PhysicalIosRecorder:
                 async with self._lock:
                     if not session.is_active:
                         return
+                    poll = session.poll_task
+                    if poll is not None and poll.done() and not poll.cancelled():
+                        exc = poll.exception()
+                        if exc is not None:
+                            session.errors.append(f"Frame capture task died: {exc}")
+                            session.is_active = False
+                            return
                     if (
                         session.anchor_monotonic is not None
                         and time.monotonic() - session.anchor_monotonic
@@ -426,4 +451,12 @@ class PhysicalIosRecorder:
         session = self._session
         if session is None:
             return None
-        return await self._finalize(session)
+        # _finalize takes _lock itself for the seal — do not hold it here.
+        finalize = asyncio.ensure_future(self._finalize(session))
+        try:
+            # Shield so a cancelled caller cannot abort mid-finalize and
+            # lose already-captured frames (mirrors IosScreenRecorder).
+            return await asyncio.shield(finalize)
+        except asyncio.CancelledError:
+            await finalize
+            raise

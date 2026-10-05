@@ -9,4 +9,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Native Xcode simulator drivers (loaded only when iOS is selected)."""
+"""Native iOS drivers: Xcode simulators and paired physical devices (loaded only when iOS is selected)."""
