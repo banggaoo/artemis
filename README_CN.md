@@ -108,7 +108,7 @@ cd artemis
 
 ### iOS 模拟器（macOS，Xcode 27+）
 
-独立 CLI 和嵌入式 Python SDK 可以通过 Xcode 原生 MCP 设备交互工具控制 iOS 模拟器。
+CLI、嵌入式 Python SDK、Web 控制台与守护进程任务都可以通过 Xcode 原生 MCP 设备交互工具控制 iOS 模拟器。
 安装要求、Xcode 权限审批和当前限制见 [iOS 使用指南（英文）](./docs/ios.md)：
 
 ```bash
@@ -309,7 +309,7 @@ ARTEMIS 提供两种运行模式以适应不同的自动化需求：
 ## 路线图
 
 - [ ] **Android Studio 深度集成**：推出官方 IDE 插件与协同工作流，支持在 Android Studio 内直接进行自动化测试、设备交互与断点调试。
-- [ ] **iOS 跨平台支持**：[独立模式 iOS 模拟器支持](./docs/ios.md)已支持 Xcode 27+；真机和 Web/Daemon 集成仍在规划中。
+- [ ] **iOS 跨平台支持**：[iOS 模拟器支持](./docs/ios.md)已支持 Xcode 27+，覆盖 CLI、SDK、Web 控制台、守护进程、MCP、回放与投屏；真机仍在规划中。
 - [ ] **端侧轻量化模型**：支持离线运行的轻量级 Edge VLM，实现低延迟与隐私安全的本地自动化。
 - [ ] **实时语音双工交互**：支持自然语音下发任务与实时打断（Barge-in）控制。
 
