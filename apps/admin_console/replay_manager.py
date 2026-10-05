@@ -397,7 +397,7 @@ class ReplayManager:
         return output_dir
 
     def list_devices(self) -> list[dict]:
-        """Connected Android devices plus available iOS simulators."""
+        """Connected Android devices, iOS simulators, and physical iOS devices."""
         devices: list[dict] = []
         try:
             from adbutils import AdbClient
@@ -423,6 +423,29 @@ class ReplayManager:
                 )
         except Exception as e:
             print(f"Warning: Failed to query iOS simulators: {e}")
+        try:
+            from artemis.drivers.ios.discovery import (
+                is_physical_ios,
+                list_core_devices_sync,
+            )
+
+            for device in list_core_devices_sync() or []:
+                if not is_physical_ios(device):
+                    continue
+                connected = (
+                    device.get("pairing_state") == "paired"
+                    and device.get("connection_state") == "connected"
+                )
+                devices.append(
+                    {
+                        "serial": device["udid"],
+                        "status": "online" if connected else "offline",
+                        "platform": "ios",
+                        "model": device.get("name"),
+                    }
+                )
+        except Exception as e:
+            print(f"Warning: Failed to query iOS physical devices: {e}")
         return devices
 
     def load_session_goal(

@@ -97,7 +97,7 @@ def _uiautomator_fix(serial: str | None) -> list[str]:
 
 
 def _ios_fix_for_error(error: str | None, serial: str | None) -> list[str]:
-    """iOS Simulator repair steps (simctl/Xcode instead of adb/UIAutomator)."""
+    """iOS repair steps (simctl/devicectl/Xcode instead of adb/UIAutomator)."""
     s = serial or "<UDID>"
     text = (error or "").lower()
     if "busy" in text or "another task" in text:
@@ -114,9 +114,21 @@ def _ios_fix_for_error(error: str | None, serial: str | None) -> list[str]:
         return [
             "Install Xcode 27 or later and select it: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer",
         ]
+    if "pair" in text or "trust" in text or "developer mode" in text:
+        return [
+            "Pair and trust the device: reconnect it and approve the Trust prompt on the iPhone/iPad.",
+            "On iOS 16+, enable Developer Mode in Settings > Privacy & Security and restart the device.",
+            "List devices: xcrun devicectl list devices",
+        ]
+    if "offline" in text or "not connected" in text or "disconnected" in text:
+        return [
+            "Attach the iPhone/iPad over USB or ensure network pairing is reachable.",
+            f"Verify connectivity: xcrun devicectl list devices (expect 'connected' for {s})",
+        ]
     if "simulator" in text or "udid" in text or "boot" in text or "not available" in text:
         return [
             f"List simulators: xcrun simctl list devices; boot one with: xcrun simctl boot {s}",
+            "For physical devices: xcrun devicectl list devices (must show paired + connected).",
             "Create a simulator in Xcode > Settings > Platforms if none exist.",
         ]
     return [

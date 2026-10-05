@@ -147,12 +147,12 @@ class Agent(AgentBase):
             raise AgentError("iOS Simulator support is local only; cloud mode targets Android.")
         if self._initialized:
             return True
-        from artemis.drivers.ios.xcode_driver import XcodeSimulatorDriver
+        from artemis.drivers.factory import ios_driver_class
 
         publish_startup_progress(
-            "device_check", "Checking the iOS simulator", session_id=self._session_id
+            "device_check", "Checking the iOS device", session_id=self._session_id
         )
-        driver = XcodeSimulatorDriver(
+        driver = ios_driver_class(self._config.device_id or "booted")(
             device_id=self._config.device_id or "booted",
             workspace_path=getattr(self._config, "ios_workspace_path", None),
         )
@@ -177,7 +177,7 @@ class Agent(AgentBase):
         # simctl recording is supported and honors the configured flag.
         self._config = self._config.model_copy(update={"disable_device_probes": True})
         publish_startup_progress(
-            "device_ready", "iOS simulator selected", session_id=self._session_id
+            "device_ready", "iOS device selected", session_id=self._session_id
         )
         asyncio.create_task(self._prewarm_llm_connections(api_key))
         self._initialized = True
