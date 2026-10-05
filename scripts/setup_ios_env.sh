@@ -22,7 +22,7 @@ fail() {
     exit 1
 }
 
-[[ "$(uname -s)" == "Darwin" ]] || fail "iOS simulator support requires macOS."
+[[ "$(uname -s)" == "Darwin" ]] || fail "iOS support requires macOS."
 
 command -v xcodebuild >/dev/null 2>&1 || fail "Install Xcode 27 or newer."
 command -v xcrun >/dev/null 2>&1 || fail "Xcode's xcrun is unavailable."

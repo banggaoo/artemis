@@ -125,6 +125,12 @@ def _ios_fix_for_error(error: str | None, serial: str | None) -> list[str]:
             "Attach the iPhone/iPad over USB or ensure network pairing is reachable.",
             f"Verify connectivity: xcrun devicectl list devices (expect 'connected' for {s})",
         ]
+    if "webdriveragent" in text or "wda" in text:
+        return [
+            "Install a signed WebDriverAgent runner on the device (see docs/ios.md).",
+            "Approve the device's UI Automation passcode prompt, then retry.",
+            "Override the endpoint with ARTEMIS_IOS_WDA_URL when forwarding via iproxy/pymobiledevice3.",
+        ]
     if "simulator" in text or "udid" in text or "boot" in text or "not available" in text:
         return [
             f"List simulators: xcrun simctl list devices; boot one with: xcrun simctl boot {s}",
@@ -317,7 +323,7 @@ async def smoke_test_device(
 
         {"ok": bool, "serial": str | None, "elapsed_seconds": float,
          "screenshot_bytes": int | None, "element_count": int | None,
-         "hierarchy_backend": "helper" | "uiautomator" | "xcode" | None,
+         "hierarchy_backend": "helper" | "uiautomator" | "xcode" | "webdriveragent" | None,
          "error": str | None, "fix": list[str]}
     """
     started = time.monotonic()
@@ -369,14 +375,16 @@ async def smoke_test_device(
             "controller-init",
         )
     except TimeoutError:
+        label = "iOS driver" if is_ios else "UIAutomator/controller"
         return _finish(
-            f"UIAutomator/controller initialization did not respond within {timeout_seconds:g}s"
+            f"{label} initialization did not respond within {timeout_seconds:g}s"
         )
     except _PASSTHROUGH_EXCEPTIONS:
         raise
     except BaseException as exc:  # pylint: disable=broad-exception-caught
         cause = _describe_failure(exc)
-        return _finish(f"Failed to initialize Android device controller: {cause}", cause)
+        target = "iOS device" if is_ios else "Android device"
+        return _finish(f"Failed to initialize {target} controller: {cause}", cause)
 
     controller_ctx = getattr(controller, "ctx", None)
     device = getattr(controller_ctx, "device", None)
@@ -399,7 +407,8 @@ async def smoke_test_device(
             "screen-data",
         )
     except TimeoutError:
-        return _finish(f"UIAutomator/screen capture did not respond within {timeout_seconds:g}s")
+        source = "native iOS" if is_ios else "UIAutomator/"
+        return _finish(f"{source}screen capture did not respond within {timeout_seconds:g}s")
     except _PASSTHROUGH_EXCEPTIONS:
         raise
     except BaseException as exc:  # pylint: disable=broad-exception-caught
@@ -409,7 +418,13 @@ async def smoke_test_device(
     result["screenshot_bytes"] = _decoded_length(getattr(device_data, "base64", None))
     result["element_count"] = _count_elements(getattr(device_data, "elements", None))
     if is_ios:
-        result["hierarchy_backend"] = "xcode"
+        from artemis.drivers.ios.physical_driver import PhysicalIosDriver
+
+        result["hierarchy_backend"] = (
+            "webdriveragent"
+            if isinstance(getattr(controller, "_driver", None), PhysicalIosDriver)
+            else "xcode"
+        )
     else:
         from artemis.clients.screen_client_factory import describe_backend
 
@@ -424,8 +439,9 @@ async def smoke_test_device(
             f"Screenshot capture failed (driver returned a {result['screenshot_bytes']}-byte placeholder image)"
         )
     if not result["element_count"]:
+        source = "Hierarchy" if is_ios else "UIAutomator hierarchy"
         return _finish(
-            "UIAutomator hierarchy dump returned no UI elements (screenshot worked, hierarchy did not)"
+            f"{source} dump returned no UI elements (screenshot worked, hierarchy did not)"
         )
     return _finish(None)
 

@@ -30,7 +30,7 @@ class RunRequest(BaseModel):
     app_path: str | None = None
     device_serial: str | None = None
     # Target platform: "android" (default) or "ios". For iOS, device_serial is a
-    # simulator UDID and ios_workspace optionally scopes the Xcode approval grant.
+    # simulator or physical UDID and ios_workspace optionally scopes the Xcode approval grant.
     platform: str | None = None
     ios_workspace: str | None = None
     ingress: str | None = "frontend"

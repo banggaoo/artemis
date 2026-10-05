@@ -81,7 +81,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
     def for_ios_simulator(
         self, device_id: str = "booted", *, workspace_path: str | Path | None = None
     ) -> "AgentConfigBuilder":
-        """Target an iOS simulator UDID, or the single booted simulator."""
+        """Target an iOS device UDID (simulator or paired physical), or the booted simulator."""
         if workspace_path is not None:
             self.with_ios_workspace(workspace_path)
         return self.for_device(DevicePlatform.IOS, device_id)

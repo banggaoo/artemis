@@ -13,7 +13,6 @@
 """Physical iOS device behavior tested without attached hardware."""
 
 import asyncio
-import base64
 import io
 import json
 from pathlib import Path
@@ -62,7 +61,7 @@ def _parsed(*devices):
     return discovery.parse_devicectl_devices(_devicectl_payload(*devices))
 
 
-PHYSICAL_IPHONE = _devicectl_device(IPHONE_UDID, name="dongseok의 iPhone")
+PHYSICAL_IPHONE = _devicectl_device(IPHONE_UDID, name="Jane's iPhone")
 OFFLINE_IPHONE = _devicectl_device(IPHONE_UDID, name="iPhone", tunnel="disconnected")
 UNPAIRED_IPHONE = _devicectl_device(IPHONE_UDID, name="iPhone", pairing="unpaired")
 SIMULATOR = _devicectl_device(
@@ -127,7 +126,7 @@ def test_find_physical_device_matches_udid_case_insensitively(monkeypatch):
     )
     found = discovery.find_physical_ios_device_sync(IPHONE_UDID.lower())
     assert found is not None and found["udid"] == IPHONE_UDID
-    assert discovery.find_physical_ios_device_sync("dongseok의 iPhone") is not None
+    assert discovery.find_physical_ios_device_sync("Jane's iPhone") is not None
     assert discovery.find_physical_ios_device_sync(SIM_UDID) is None
     assert discovery.find_physical_ios_device_sync("missing") is None
 
@@ -142,6 +141,17 @@ def driver():
     return PhysicalIosDriver(device_id=IPHONE_UDID)
 
 
+@pytest.fixture(autouse=True)
+def _clean_wda_env(monkeypatch):
+    for key in (
+        'ARTEMIS_IOS_WDA_URL',
+        'ARTEMIS_IOS_WDA_HOST',
+        'ARTEMIS_IOS_WDA_XCTESTRUN',
+        'ARTEMIS_IOS_WDA_BUNDLE_ID',
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
 @pytest.mark.asyncio
 async def test_physical_resolve_rejects_booted_and_empty_serials(driver):
     driver._device_id = "booted"
@@ -151,7 +161,7 @@ async def test_physical_resolve_rejects_booted_and_empty_serials(driver):
 
 @pytest.mark.asyncio
 async def test_physical_resolve_pins_the_udid(driver, monkeypatch):
-    monkeypatch.setattr(physical_driver, "list_core_devices", _AsyncDevices(_parsed(PHYSICAL_IPHONE, SIMULATOR)))
+    monkeypatch.setattr(physical_driver, "list_core_devices", _async_devices(_parsed(PHYSICAL_IPHONE, SIMULATOR)))
     candidate = await driver._resolve_device()
     assert candidate["udid"] == IPHONE_UDID
     assert driver.device_id == IPHONE_UDID
@@ -160,7 +170,7 @@ async def test_physical_resolve_pins_the_udid(driver, monkeypatch):
 @pytest.mark.asyncio
 async def test_physical_resolve_rejects_simulator_udids(driver, monkeypatch):
     driver._device_id = SIM_UDID
-    monkeypatch.setattr(physical_driver, "list_core_devices", _AsyncDevices(_parsed(SIMULATOR)))
+    monkeypatch.setattr(physical_driver, "list_core_devices", _async_devices(_parsed(SIMULATOR)))
     with pytest.raises(ValueError, match="Simulator"):
         await driver._resolve_device()
 
@@ -168,14 +178,14 @@ async def test_physical_resolve_rejects_simulator_udids(driver, monkeypatch):
 @pytest.mark.asyncio
 async def test_physical_resolve_rejects_non_ios_hardware(driver, monkeypatch):
     driver._device_id = WATCH_UDID
-    monkeypatch.setattr(physical_driver, "list_core_devices", _AsyncDevices(_parsed(WATCH)))
+    monkeypatch.setattr(physical_driver, "list_core_devices", _async_devices(_parsed(WATCH)))
     with pytest.raises(ValueError, match="paired physical iOS"):
         await driver._resolve_device()
 
 
 @pytest.mark.asyncio
 async def test_physical_resolve_reports_enumeration_failure(driver, monkeypatch):
-    monkeypatch.setattr(physical_driver, "list_core_devices", _AsyncDevices(None))
+    monkeypatch.setattr(physical_driver, "list_core_devices", _async_devices(None))
     with pytest.raises(RuntimeError, match="devicectl"):
         await driver._resolve_device()
 
@@ -197,7 +207,7 @@ async def test_connected_device_needs_no_boot(driver):
     await driver._prepare_device(_parsed(PHYSICAL_IPHONE)[0])
 
 
-def _AsyncDevices(result):
+def _async_devices(result):
     async def _list(force_refresh=False):
         return result
 
@@ -232,6 +242,7 @@ class _FakeWda:
 
     def __init__(self, window=(100.0, 200.0), tree=None):
         self.session_id = None
+        self.base_url = "http://fake-wda:8100"
         self.window = window
         self.tree = tree if tree is not None else {"type": "Application", "children": []}
         self.tapped: list[tuple[float, float, int]] = []
@@ -772,7 +783,7 @@ async def test_disconnect_closes_wda_and_terminates_runner(connected_driver, mon
 @pytest.mark.asyncio
 async def test_connect_establishes_wda_session(driver, monkeypatch):
     client = _FakeWda()
-    monkeypatch.setattr(physical_driver, "list_core_devices", _AsyncDevices(_parsed(PHYSICAL_IPHONE)))
+    monkeypatch.setattr(physical_driver, "list_core_devices", _async_devices(_parsed(PHYSICAL_IPHONE)))
     monkeypatch.setattr(driver, "_ensure_wda", _async_return(client))
     monkeypatch.setattr(driver, "_require_ios_host", _async_return(None))
     await driver.connect()

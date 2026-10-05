@@ -94,7 +94,7 @@ async def execute_task(
     if ios_workspace_path is not None and platform != DevicePlatform.IOS:
         raise ValueError("--ios-workspace requires --platform ios.")
     if platform == DevicePlatform.IOS and os.environ.get("ARTEMIS_CLOUD_MODE") == "1":
-        raise ValueError("iOS Simulator support is local only; cloud mode targets Android.")
+        raise ValueError("iOS support is local only; cloud mode targets Android.")
     effective_sid = (
         session_id or os.getenv("ARTEMIS_SESSION_ID") or os.getenv("ARTEMIS_CLOUD_SESSION_ID")
     )
@@ -230,7 +230,7 @@ def run_command(
         str | None,
         typer.Option(
             "--app-path",
-            help="Local Android APK or iOS simulator .app directory to install before the task.",
+            help="Local Android APK or signed iOS .app/.ipa to install before the task.",
         ),
     ] = None,
     enable_planner_validation: Annotated[
@@ -334,7 +334,7 @@ def run_command(
         ),
     ] = False,
 ) -> None:
-    """Run an autonomous UI automation task on an Android device or iOS simulator."""
+    """Run an autonomous UI automation task on an Android or iOS device."""
 
     console = Console()
 
@@ -350,10 +350,10 @@ def run_command(
     if platform == DevicePlatform.IOS:
         if os.environ.get("ARTEMIS_CLOUD_MODE") == "1":
             raise typer.BadParameter(
-                "iOS Simulator support is local only; cloud mode targets Android."
+                "iOS support is local only; cloud mode targets Android."
             )
         if locked_app_package:
-            raise typer.BadParameter("--locked-app is unavailable for iOS simulator tasks.")
+            raise typer.BadParameter("--locked-app is unavailable for iOS tasks.")
     ensure_video_recording_available(with_video_recording_tools)
 
     # All platforms route through unified Artemis Daemon unless specifically configured as standalone

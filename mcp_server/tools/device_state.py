@@ -49,10 +49,10 @@ async def mobile_get_device_state(
           - "hierarchy": returns the simplified text-labeled element list —
             exactly what the automation subagent sees when making decisions.
         device_serial: Optional device serial (e.g. "emulator-5554", or an iOS
-          simulator UDID with platform="ios") to inspect a specific device;
+          device UDID with platform="ios") to inspect a specific device;
           omitted → the default connected device.
         platform: "android" (default) or "ios". For iOS, device_serial is a
-          simulator UDID; omit it to use the single booted simulator.
+          device UDID (simulator or paired physical device); omit it to use the single booted simulator.
     """
     try:
         controller = _get_controller(

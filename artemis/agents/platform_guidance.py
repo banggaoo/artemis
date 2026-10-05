@@ -19,9 +19,9 @@ def device_action_guidance(ctx) -> str:
     if getattr(getattr(ctx, "device", None), "mobile_platform", None) != "ios":
         return ""
     return (
-        "Target platform: iOS Simulator. For input_text, explicitly set clear_exist=false; "
+        "Target platform: iOS. For input_text, explicitly set clear_exist=false; "
         "type into an empty field or at its existing cursor. Whole-field clearing, Android "
-        "keycodes, Back/Delete keys, ADB commands, video analysis and app locking are "
+        "keycodes, Back/Delete keys, ADB commands, and app locking are "
         "unavailable. Navigate with visible iOS controls; press_key supports enter, home, "
         "power, volume_up, volume_down, and app_switch. manage_app accepts installed iOS "
         "display names or bundle identifiers. Action coordinates use the screenshot's "

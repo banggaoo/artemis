@@ -10,12 +10,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""iOS Simulator Readiness Probe.
+"""iOS Device Readiness Probe.
 
 Informational only (``is_blocker = False``): iOS support is opt-in per task,
 so a missing Xcode toolchain must never block the Android default path. The
-probe reports whether this host could run an iOS Simulator task today —
-macOS, Xcode 27+, and at least one available simulator.
+probe reports whether this host could run an iOS task today — macOS, Xcode
+27+, and at least one available simulator or paired+connected physical
+device.
 """
 
 import asyncio
@@ -57,7 +58,7 @@ class IosSimulatorProbe(BaseProbe):
             return ProbeResult(
                 id=self.probe_id,
                 category=self.category,
-                title="iOS Simulator",
+                title="iOS Devices",
                 status=ProbeStatus.SKIPPED,
                 is_blocker=self.is_blocker,
                 summary="Unavailable",
@@ -106,7 +107,7 @@ class IosSimulatorProbe(BaseProbe):
             return ProbeResult(
                 id=self.probe_id,
                 category=self.category,
-                title="iOS Simulator",
+                title="iOS Devices",
                 status=ProbeStatus.WARN,
                 is_blocker=self.is_blocker,
                 summary="Xcode 27+ Required",
