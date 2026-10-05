@@ -27,10 +27,10 @@ from artemis.drivers.ios.physical_recording import PhysicalIosRecorder
 from artemis.drivers.ios.wda import WdaClient
 
 
-IPHONE_UDID = "00008130-000245193C60001C"
-IPAD_UDID = "00008103-00197094013B001E"
+IPHONE_UDID = "00008130-0000ABCD1234AAAA"
+IPAD_UDID = "00008103-0000ABCD1234BBBB"
 SIM_UDID = "DE345DD3-5792-4DAD-B863-144682629565"
-WATCH_UDID = "00008301-D8814D603680202E"
+WATCH_UDID = "00008301-0000ABCD1234CCCC"
 
 
 def _devicectl_device(
@@ -137,8 +137,10 @@ def test_find_physical_device_survives_enumeration_failure(monkeypatch):
 
 
 @pytest.fixture
-def driver():
-    return PhysicalIosDriver(device_id=IPHONE_UDID)
+def driver(monkeypatch):
+    instance = PhysicalIosDriver(device_id=IPHONE_UDID)
+    monkeypatch.setattr(instance, "_require_ios_host", _async_return(None))
+    return instance
 
 
 @pytest.fixture(autouse=True)
@@ -451,9 +453,9 @@ async def test_open_url_uses_devicectl(connected_driver, monkeypatch):
         return b"{}"
 
     monkeypatch.setattr(physical_driver, "run_xcrun", fake_xcrun)
-    assert await connected_driver.open_url("bookwriter://open")
+    assert await connected_driver.open_url("example://open")
     assert calls[0][:5] == ("devicectl", "device", "process", "openURL", "--device")
-    assert calls[0][-1] == "bookwriter://open"
+    assert calls[0][-1] == "example://open"
 
 
 @pytest.mark.asyncio
