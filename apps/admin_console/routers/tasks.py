@@ -71,6 +71,26 @@ async def get_task_catalog():
     }
 
 
+@router.get("/api/v1/capabilities")
+async def get_capabilities():
+    """Static wire-feature advertisement — no device or service probing.
+
+    ``platform.ios`` means the API accepts iOS submissions; it does not
+    imply Xcode approval or attached hardware on this host.
+    """
+    return {
+        "api_version": "1",
+        "features": [
+            "tasks.submit",
+            "tasks.get",
+            "tasks.stop",
+            "devices.list",
+            "system.readiness",
+            "platform.ios",
+        ],
+    }
+
+
 @router.post("/api/run")
 async def run_task(request: RunRequest):
     incoming_goals = []
@@ -305,7 +325,9 @@ async def get_status():
             "pid": owner.pid,
             "ingress": owner.ingress,
             "acquired_at": owner.acquired_at,
-            "platform": "ios" if getattr(owner, "lock_scope", None) == IOS_LOCK_SCOPE else "android",
+            "platform": "ios"
+            if getattr(owner, "lock_scope", None) == IOS_LOCK_SCOPE
+            else "android",
         }
         for owner in active_owners.values()
     ]

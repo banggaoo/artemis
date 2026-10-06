@@ -58,6 +58,7 @@ from typing import Any, TypeVar
 
 from artemis.runtime.adb_endpoint import normalize_device_platform
 from artemis.runtime.device_lock import DeviceExecutionLock
+from artemis.runtime.ios_observation import observe_ios_controller
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -99,6 +100,8 @@ def _uiautomator_fix(serial: str | None) -> list[str]:
 
 def _ios_fix_for_error(error: str | None, serial: str | None) -> list[str]:
     """iOS repair steps (simctl/Xcode for simulators, devicectl/WDA for hardware)."""
+    if not error:
+        return []
     s = serial or "<UDID>"
     text = (error or "").lower()
     if "busy" in text or "another task" in text:
@@ -324,7 +327,13 @@ async def smoke_test_device(
          "error": str | None, "fix": list[str]}
     """
     started = time.monotonic()
-    requested_serial = _resolve_requested_serial(device_serial)
+    is_ios = normalize_device_platform(platform, strict=False) == "ios"
+    # iOS targets are UDIDs; ADB_DEVICE_SERIAL is Android-only fallback.
+    requested_serial = (
+        (device_serial or os.environ.get("ARTEMIS_DEVICE_ID"))
+        if is_ios
+        else _resolve_requested_serial(device_serial)
+    )
     result: dict[str, Any] = {
         "ok": False,
         "serial": requested_serial,
@@ -346,7 +355,9 @@ async def smoke_test_device(
         )
         return result
 
-    busy = _find_busy_owner(requested_serial)
+    # iOS skips this unscoped sweep: observe_ios_controller performs atomic,
+    # scope-correct lease admission on the resolved UDID itself.
+    busy = None if is_ios else _find_busy_owner(requested_serial)
     if busy is not None:
         key, owner = busy
         description = getattr(owner, "description", "") or "unknown task"
@@ -357,25 +368,30 @@ async def smoke_test_device(
             " skipping the screen capture so the running task is not disturbed."
         )
 
-    is_ios = normalize_device_platform(platform, strict=False) == "ios"
     try:
         from artemis.mcp import adb_server
 
-        # Keep the Android call shape identical; the platform kwarg only
-        # exists for iOS.
-        controller = await _run_in_daemon_thread(
-            lambda: adb_server._get_controller(
-                device_serial=device_serial,
-                **({"target_platform": platform} if is_ios else {}),
-            ),
-            timeout_seconds,
-            "controller-init",
-        )
+        if is_ios:
+            # iOS controller construction enumerates simctl/devicectl lazily;
+            # offload the sync factory instead of the daemon-thread hop used
+            # for the blocking Android UIAutomator handshake.
+            controller = await asyncio.wait_for(
+                asyncio.to_thread(
+                    adb_server._get_controller,
+                    device_serial=device_serial,
+                    target_platform="ios",
+                ),
+                timeout_seconds,
+            )
+        else:
+            controller = await _run_in_daemon_thread(
+                lambda: adb_server._get_controller(device_serial=device_serial),
+                timeout_seconds,
+                "controller-init",
+            )
     except TimeoutError:
         label = "iOS driver" if is_ios else "UIAutomator/controller"
-        return _finish(
-            f"{label} initialization did not respond within {timeout_seconds:g}s"
-        )
+        return _finish(f"{label} initialization did not respond within {timeout_seconds:g}s")
     except _PASSTHROUGH_EXCEPTIONS:
         raise
     except BaseException as exc:  # pylint: disable=broad-exception-caught
@@ -391,18 +407,22 @@ async def smoke_test_device(
 
     remaining = max(0.5, timeout_seconds - (time.monotonic() - started))
     try:
+        if is_ios:
+            # Runs on the caller's loop: the helper owns lease + connect +
+            # capture + disconnect + release and is cancellation-safe, unlike
+            # the Android coroutine which must be bounced onto a private
+            # thread/loop because UIAutomator blocks the loop thread.
+            device_data = await asyncio.wait_for(observe_ios_controller(controller), remaining)
+        else:
 
-        async def _observe() -> Any:
-            if is_ios:
-                # The native Xcode session opens lazily on first use.
-                await controller._driver.connect()
-            return await controller.get_screen_data()
+            async def _observe() -> Any:
+                return await controller.get_screen_data()
 
-        device_data = await _run_in_daemon_thread(
-            lambda: _run_coroutine_blocking(_observe),
-            remaining,
-            "screen-data",
-        )
+            device_data = await _run_in_daemon_thread(
+                lambda: _run_coroutine_blocking(_observe),
+                remaining,
+                "screen-data",
+            )
     except TimeoutError:
         label = "iOS session capture" if is_ios else "UIAutomator/screen capture"
         return _finish(f"{label} did not respond within {timeout_seconds:g}s")
@@ -417,8 +437,14 @@ async def smoke_test_device(
     if is_ios:
         from artemis.drivers.ios.physical_driver import PhysicalIosDriver
 
+        # Report the canonical UDID the observation lease actually resolved.
+        resolved_serial = getattr(device, "device_id", None)
+        if isinstance(resolved_serial, str) and resolved_serial:
+            result["serial"] = resolved_serial
         result["hierarchy_backend"] = (
-            "wda" if isinstance(getattr(controller, "_driver", None), PhysicalIosDriver) else "xcode"
+            "wda"
+            if isinstance(getattr(controller, "_driver", None), PhysicalIosDriver)
+            else "xcode"
         )
     else:
         from artemis.clients.screen_client_factory import describe_backend
@@ -435,9 +461,7 @@ async def smoke_test_device(
         )
     if not result["element_count"]:
         backend = "Xcode accessibility tree" if is_ios else "UIAutomator hierarchy dump"
-        return _finish(
-            f"{backend} returned no UI elements (screenshot worked, hierarchy did not)"
-        )
+        return _finish(f"{backend} returned no UI elements (screenshot worked, hierarchy did not)")
     return _finish(None)
 
 

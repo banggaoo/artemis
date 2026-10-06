@@ -674,7 +674,7 @@
               <div class="step-title-row">
                 <h3 class="step-title">Device & Emulator Connection</h3>
               </div>
-              <p class="step-desc">Android device or emulator via ADB, or an iOS Simulator (Xcode 27+)</p>
+              <p class="step-desc">Android device or emulator via ADB, or an iOS Simulator / paired iPhone or iPad (Xcode 27+)</p>
             </div>
 
             @if (deviceGuidePlatform() === 'android') {
@@ -710,7 +710,7 @@
 
           <div class="guide-card-body">
 
-            <!-- Platform split: Android (ADB) vs iOS Simulator -->
+            <!-- Platform split: Android (ADB) vs iOS devices -->
             <div class="platform-tabs">
               <button
                 type="button"
@@ -731,7 +731,7 @@
                 (click)="deviceGuidePlatform.set('ios')"
               >
                 <span class="material-symbols-outlined plat-icon">phone_iphone</span>
-                <span>iOS Simulator</span>
+                <span>iOS Devices</span>
                 @if (iosDevices().length > 0) {
                   <span class="plat-count">{{ iosDevices().length }}</span>
                 }
@@ -1708,7 +1708,7 @@
 
             } @else {
 
-            <!-- iOS TAB: SIMULATORS VIA XCODE 27+ -->
+            <!-- iOS TAB: SIMULATORS AND PAIRED DEVICES VIA XCODE 27+ -->
             <div class="ios-device-panel">
 
               <!-- Selected simulator hero -->
@@ -1725,7 +1725,7 @@
                         {{ sim.model || sim.serial }}
                       </div>
                       <div class="device-hero-meta">
-                        <span>iOS Simulator</span>
+                        <span>{{ sim.is_emulator ? 'iOS Simulator' : 'Physical iOS Device' }}</span>
                         <span class="meta-dot">·</span>
                         <span>{{ sim.serial }}</span>
                         @if (sim.product) {
@@ -1736,21 +1736,21 @@
                     </div>
                     <div class="device-hero-status" [class.status-idle]="sim.state !== 'device'">
                       <span class="status-dot" [class.dot-pass]="sim.state === 'device'" [class.dot-warn]="sim.state !== 'device'"></span>
-                      <span class="status-text">{{ sim.state === 'device' ? 'Booted' : 'Shutdown — boots on run' }}</span>
+                      <span class="status-text">{{ sim.state === 'device' ? (sim.is_emulator ? 'Booted' : 'Connected') : (sim.is_emulator ? 'Shutdown — boots on run' : sim.state) }}</span>
                     </div>
                   </div>
                 </div>
               }
 
-              <!-- Simulator picker -->
+              <!-- iOS device picker -->
               @if (iosDevices().length > 0) {
                 <div class="ios-sim-panel">
                   <div class="ios-sim-header">
                     <span class="material-symbols-outlined ios-sim-icon">phone_iphone</span>
                     <div class="ios-sim-header-text">
-                      <span class="ios-sim-title">iOS Simulators</span>
+                      <span class="ios-sim-title">iOS Devices</span>
                       <span class="ios-sim-desc">
-                        {{ iosDevices().length }} available — select one to run iOS tasks
+                        {{ iosDevices().length }} available — select a simulator or paired iPhone/iPad to run iOS tasks
                       </span>
                     </div>
                   </div>
@@ -1766,7 +1766,7 @@
                           {{ dev.model?.includes('iPad') ? 'tablet_mac' : 'phone_iphone' }}
                         </span>
                         <span class="chip-name">{{ dev.model || dev.serial }}</span>
-                        <span class="sim-state-dot" [class.booted]="dev.state === 'device'" [class.booting]="dev.state === 'Booting'" [title]="dev.state === 'device' ? 'Booted' : dev.state"></span>
+                        <span class="sim-state-dot" [class.booted]="dev.state === 'device'" [class.booting]="dev.state === 'Booting'" [title]="dev.state === 'device' ? (dev.is_emulator ? 'Booted' : 'Connected') : dev.state"></span>
                         @if (dev.serial === selectedDeviceSerial()) {
                           <span class="active-check">✓ Active</span>
                         }
@@ -1778,9 +1778,9 @@
                 <div class="ios-empty-state">
                   <span class="material-symbols-outlined ios-empty-icon">phone_iphone</span>
                   <div class="ios-empty-text">
-                    <div class="ios-empty-title">No iOS Simulators Available</div>
+                    <div class="ios-empty-title">No iOS Devices Available</div>
                     <div class="ios-empty-desc">
-                      {{ iosProbe()?.description || 'iOS Simulator automation requires macOS with Xcode 27+ and at least one available simulator.' }}
+                      {{ iosProbe()?.description || 'iOS automation requires macOS with Xcode 27+ and an available simulator or a paired iPhone/iPad. Physical devices also need WebDriverAgent on the device.' }}
                     </div>
                   </div>
                 </div>

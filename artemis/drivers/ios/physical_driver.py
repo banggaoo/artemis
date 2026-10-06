@@ -28,7 +28,6 @@ set ``ARTEMIS_IOS_WDA_URL`` to reach an existing server directly.
 
 import asyncio
 import base64
-import contextlib
 from io import BytesIO
 import json
 import os
@@ -47,6 +46,7 @@ from artemis.drivers.ios.discovery import (
     devicectl_screenshot,
     is_physical_ios,
     list_core_devices,
+    reap_process,
     run_xcrun,
 )
 from artemis.drivers.ios.physical_recording import PhysicalIosRecorder
@@ -112,7 +112,7 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
 
     async def _resolve_device(self) -> dict[str, Any]:
         self._validate_workspace()
-        if self._device_id in ("", BOOTED_SIMULATOR_ID):
+        if not self._device_id.strip() or self._device_id.strip().lower() == BOOTED_SIMULATOR_ID:
             raise ValueError(
                 "Physical iOS devices require --device-serial <device UDID>; "
                 "'booted' only selects simulators. Find UDIDs via 'xcrun devicectl list devices'."
@@ -126,16 +126,14 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         matches = [
             device
             for device in devices
-            if is_physical_ios(device)
-            and device_matches_identifier(device, self._device_id)
+            if is_physical_ios(device) and device_matches_identifier(device, self._device_id)
         ]
         if not matches:
             needle = self._device_id.lower()
             simulator = [
                 device
                 for device in devices
-                if device.get("udid", "").lower() == needle
-                and device.get("reality") == "simulated"
+                if device.get("udid", "").lower() == needle and device.get("reality") == "simulated"
             ]
             if simulator:
                 raise ValueError(
@@ -144,6 +142,12 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
             raise ValueError(
                 f"No paired physical iOS device matches {self._device_id!r}. "
                 "Attach it, trust this Mac, and verify 'xcrun devicectl list devices'."
+            )
+        if len(matches) > 1:
+            udids = sorted(device.get("udid", "?") for device in matches)
+            raise ValueError(
+                f"{len(matches)} physical iOS devices match {self._device_id!r} "
+                f"({', '.join(udids)}); target the device UDID instead."
             )
         candidate = matches[0]
         self._device_id = candidate["udid"]
@@ -171,21 +175,41 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                 return
             candidate = await self._resolve_device()
             await self._prepare_device(candidate)
+            connected = False
             try:
                 self._wda = await self._ensure_wda()
+                # The reachable WDA endpoint must belong to THIS device before
+                # we open a session or send input: names corroborate identity
+                # (uuid is identifierForVendor, not the UDID).
+                info = await self._wda.device_info()
+                expected_name = candidate.get("name") or ""
+                if (
+                    info.get("isSimulator") is not False
+                    or not expected_name
+                    or info.get("name") != expected_name
+                ):
+                    raise RuntimeError(
+                        f"The WebDriverAgent at {self._wda.base_url} does not report "
+                        f"the selected physical device {self._device_id} "
+                        f"(expected name {expected_name!r}, got "
+                        f"{info.get('name')!r}, isSimulator={info.get('isSimulator')!r}). "
+                        "Point ARTEMIS_IOS_WDA_URL at a WDA server running on the "
+                        "selected device."
+                    )
                 self._session_key = await self._wda.open_session()
                 await self.get_screen_data(skip_settling=True)
-            # Any failure here must release a half-started WDA runner,
-            # xcodebuild session, or server-side session.
-            except (Exception, asyncio.CancelledError):
-                try:
-                    await self.disconnect()
-                except (OSError, ValueError, RuntimeError, TimeoutError) as cleanup_error:
-                    logger.warning(
-                        "Could not release the WDA session after a connection failure: "
-                        f"{cleanup_error}",
-                    )
-                raise
+                connected = True
+            finally:
+                # Any incomplete setup must release a half-started WDA
+                # runner, xcodebuild session, or server-side session.
+                if not connected:
+                    try:
+                        await self.disconnect()
+                    except (OSError, ValueError, RuntimeError, TimeoutError) as cleanup_error:
+                        logger.warning(
+                            "Could not release the WDA session after a connection failure: "
+                            f"{cleanup_error}",
+                        )
 
     async def disconnect(self) -> None:
         try:
@@ -196,7 +220,7 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                     # conversions — finalize it too so nothing is lost.
                     try:
                         await self._recorder.stop()
-                    except Exception as exc:
+                    except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
                         logger.error(
                             f"Physical iOS recording finalization failed during disconnect: {exc}"
                         )
@@ -210,15 +234,24 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                 client, self._wda = self._wda, None
                 runner_pid, self._wda_runner_pid = self._wda_runner_pid, None
                 test_process, self._wda_test_process = self._wda_test_process, None
+            # Each cleanup step is isolated so a failure in one never skips
+            # the owned WDA session, the xcodebuild child, or the runner pid.
             if client is not None:
-                await client.close_session()
+                try:
+                    await client.close_session()
+                except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
+                    logger.debug(f"WDA session close failed during disconnect: {exc}")
             if test_process is not None and test_process.returncode is None:
                 try:
                     test_process.terminate()
                     await asyncio.wait_for(test_process.wait(), timeout=10.0)
                 except (TimeoutError, OSError):
-                    with contextlib.suppress(OSError):
-                        test_process.kill()
+                    # Graceful terminate failed — reap (kill + drain) the
+                    # xcodebuild child so it cannot outlive the driver.
+                    try:
+                        await reap_process(test_process)
+                    except (OSError, RuntimeError, TimeoutError) as exc:
+                        logger.debug(f"WDA xcodebuild reap failed: {exc}")
             if runner_pid is not None:
                 try:
                     await self._terminate_pid(runner_pid)
@@ -226,8 +259,16 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                     logger.debug(f"WDA runner termination failed: {exc}")
 
     def _require_connected(self) -> None:
-        if not self._session_key or self._device_id in ("", BOOTED_SIMULATOR_ID):
+        if not self._session_key or self._device_id.strip().lower() == BOOTED_SIMULATOR_ID:
             raise RuntimeError("Connect the physical iOS driver before interacting.")
+
+    def _require_wda(self) -> WdaClient:
+        """Bound WDA client for input paths; fails clearly when detached."""
+        self._require_connected()
+        client = self._wda
+        if client is None:
+            raise RuntimeError("Connect the physical iOS driver before interacting.")
+        return client
 
     async def _ensure_wda(self) -> WdaClient:
         """Attach to a reachable WDA server, starting one when possible.
@@ -249,9 +290,7 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
             await self._start_xctest_session(xctestrun)
         elif runner is not None:
             try:
-                self._wda_runner_pid = await self._launch_bundle(
-                    runner, terminate_existing=False
-                )
+                self._wda_runner_pid = await self._launch_bundle(runner, terminate_existing=False)
                 logger.info(
                     f"Launched WebDriverAgent runner {runner} on {self._device_id}; "
                     "waiting for its HTTP server"
@@ -277,9 +316,7 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                 )
             client = await probe_wda(candidates, timeout=min(5.0, remaining))
             if client is not None:
-                logger.info(
-                    f"WebDriverAgent attached at {client.base_url} for {self._device_id}"
-                )
+                logger.info(f"WebDriverAgent attached at {client.base_url} for {self._device_id}")
                 return client
             await asyncio.sleep(min(1.0, remaining))
 
@@ -343,9 +380,7 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         matches = sorted(b for b in bundles if WDA_RUNNER_PATTERN.search(b))
         return matches[0] if matches else None
 
-    async def _launch_bundle(
-        self, bundle: str, terminate_existing: bool = True
-    ) -> int | None:
+    async def _launch_bundle(self, bundle: str, terminate_existing: bool = True) -> int | None:
         arguments = [
             "devicectl",
             "device",
@@ -393,9 +428,7 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                 logger.debug(f"WDA screenshot failed, falling back to devicectl: {exc}")
         with tempfile.TemporaryDirectory(prefix="artemis-shot-") as tmp:
             target = Path(tmp) / "shot.png"
-            await devicectl_screenshot(
-                self._device_id, target, timeout=DEVICECTL_OP_TIMEOUT
-            )
+            await devicectl_screenshot(self._device_id, target, timeout=DEVICECTL_OP_TIMEOUT)
             data = target.read_bytes()
         if not data:
             raise RuntimeError("devicectl produced an empty screenshot.")
@@ -429,9 +462,7 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
             )
         self._scale = scale
         tree = await self._wda.source_json()
-        elements = parse_wda_elements(
-            tree, self._scale, self._width, self._height
-        )
+        elements = parse_wda_elements(tree, self._scale, self._width, self._height)
         return ScreenData(
             screenshot_bytes=screenshot,
             screenshot_base64=base64.b64encode(screenshot).decode("ascii"),
@@ -449,10 +480,11 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         if times < 1 or duration_ms < 0 or delay_ms < 0:
             raise ValueError("Tap count must be positive and durations nonnegative.")
         async with self._operation_lock:
+            wda = self._require_wda()
             await self._capture_unchanged("tapping")
             point = self._scaled_point(x, y)
             for index in range(times):
-                await self._wda.tap(*point, hold_ms=duration_ms)
+                await wda.tap(*point, hold_ms=duration_ms)
                 if index < times - 1:
                     await asyncio.sleep(delay_ms / 1000)
             return True
@@ -463,10 +495,11 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         if duration_ms <= 0:
             raise ValueError("Swipe duration must be positive.")
         async with self._operation_lock:
+            wda = self._require_wda()
             await self._capture_unchanged("swiping")
             start = self._scaled_point(start_x, start_y)
             end = self._scaled_point(end_x, end_y)
-            await self._wda.swipe(*start, *end, duration_ms)
+            await wda.swipe(*start, *end, duration_ms)
             return True
 
     async def swipe_direction(
@@ -480,11 +513,12 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         async with self._operation_lock:
             # Rotation-tolerant like the simulator path: recapture and compute
             # from the *current* size rather than refusing like tap.
+            wda = self._require_wda()
             await self._capture()
             sx, sy, ex, ey = self._direction_points(direction, *self.screen_size)
             start = self._scaled_point(sx, sy)
             end = self._scaled_point(ex, ey)
-            await self._wda.swipe(*start, *end, duration_ms)
+            await wda.swipe(*start, *end, duration_ms)
             return True
 
     async def input_text(self, text: str, clear_existing: bool = True) -> bool:
@@ -494,30 +528,37 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                 "UI or pass clear_existing=False. This matches the simulator behavior."
             )
         async with self._operation_lock:
-            self._require_connected()
-            await self._wda.type_text(text)
+            wda = self._require_wda()
+            await wda.type_text(text)
         return True
 
     async def press_key(self, key: KeyCode | str | int) -> bool:
         key = key.value if isinstance(key, KeyCode) else str(key).lower()
         async with self._operation_lock:
-            self._require_connected()
+            wda = self._require_wda()
             if key in ("home", "app_switch"):
                 presses = 2 if key == "app_switch" else 1
                 for index in range(presses):
-                    if not await self._wda.press_button("home"):
-                        await self._wda.homescreen()
+                    if not await wda.press_button("home"):
+                        if key == "app_switch":
+                            # A backend that cannot press Home cannot
+                            # double-press for app switching — never report
+                            # success from a homescreen fallback.
+                            raise NotImplementedError(
+                                "App switching is unavailable from this WebDriverAgent backend."
+                            )
+                        await wda.homescreen()
                     if index < presses - 1:
                         await asyncio.sleep(0.4)
             elif key == "enter":
-                await self._wda.type_text("\n")
+                await wda.type_text("\n")
             else:
                 buttons = {
                     "volume_up": "volumeUp",
                     "volume_down": "volumeDown",
                     "power": "power",
                 }
-                if key not in buttons or not await self._wda.press_button(buttons[key]):
+                if key not in buttons or not await wda.press_button(buttons[key]):
                     raise NotImplementedError(
                         f"Key {key!r} is not supported by the physical iOS driver."
                     )
@@ -527,14 +568,13 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         self, query: ElementQuery, long_press: bool = False, duration_ms: int = 1000
     ) -> bool:
         async with self._operation_lock:
+            wda = self._require_wda()
             data = await self._capture()
             element, center, error = await self.find_element(query, data)
             if error or element is None or center is None:
                 return False
             point = self._scaled_point(*center)
-            await self._wda.tap(
-                *point, hold_ms=duration_ms if long_press else 0
-            )
+            await wda.tap(*point, hold_ms=duration_ms if long_press else 0)
             return True
 
     # --- App lifecycle via devicectl ---
@@ -578,40 +618,42 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         return value.removeprefix("/private") or value
 
     async def _resolve_pid(self, package_name: str) -> int:
-        """Find a running process id for the bundle, tracking launches first."""
+        """Verified live pid: the executable must sit under the app's own URL.
+
+        A cached launch pid only prioritizes among processes already proven to
+        belong to the app — a recycled pid must never select a foreign process.
+        """
+        apps = await self._devicectl_json("info", "apps")
+        url_prefix = ""
+        for app in apps.get("apps", []):
+            if isinstance(app, dict) and app.get("bundleIdentifier") == package_name:
+                url_prefix = self._normalize_executable(app.get("url")).rstrip("/")
+                break
+        if not url_prefix:
+            raise ValueError(
+                f"{package_name!r} is not installed on {self._device_id} or its app URL "
+                "could not be determined; cannot verify a process to terminate."
+            )
+        processes = await self._devicectl_json("info", "processes")
+        candidates: list[int] = []
+        for process in processes.get("runningProcesses", []):
+            if not isinstance(process, dict):
+                continue
+            executable = self._normalize_executable(process.get("executable"))
+            if executable != url_prefix and not executable.startswith(url_prefix + "/"):
+                continue
+            pid = process.get("processIdentifier") or process.get("pid") or process.get("processID")
+            if isinstance(pid, int):
+                candidates.append(pid)
+        if not candidates:
+            raise ValueError(
+                f"No running process found for {package_name!r} on {self._device_id}; "
+                "launch it with launch_app before stopping."
+            )
         tracked = self._launched_pids.get(package_name)
-        if tracked is not None:
+        if tracked is not None and tracked in candidates:
             return tracked
-        try:
-            apps = await self._devicectl_json("info", "apps")
-            url_prefix = ""
-            for app in apps.get("apps", []):
-                if isinstance(app, dict) and app.get("bundleIdentifier") == package_name:
-                    url_prefix = self._normalize_executable(app.get("url")).rstrip("/")
-                    break
-            processes = await self._devicectl_json("info", "processes")
-            for process in processes.get("runningProcesses", []):
-                if not isinstance(process, dict):
-                    continue
-                executable = self._normalize_executable(process.get("executable"))
-                matched = (
-                    executable.startswith(url_prefix)
-                    if url_prefix
-                    else package_name in executable
-                )
-                pid = (
-                    process.get("processIdentifier")
-                    or process.get("pid")
-                    or process.get("processID")
-                )
-                if matched and isinstance(pid, int):
-                    return pid
-        except (OSError, RuntimeError, TimeoutError, ValueError, TypeError) as exc:
-            logger.debug(f"devicectl process enumeration failed: {exc}")
-        raise ValueError(
-            f"No running process found for {package_name!r} on {self._device_id}; "
-            "launch it with launch_app before stopping."
-        )
+        return candidates[0]
 
     async def _terminate_pid(self, pid: int, kill: bool = False) -> None:
         arguments = [
@@ -631,17 +673,11 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
     async def stop_app(self, package_name: str) -> bool:
         async with self._operation_lock:
             self._require_connected()
-            tracked = self._launched_pids.pop(package_name, None)
-            if tracked is not None:
-                try:
-                    await self._terminate_pid(tracked, kill=True)
-                    return True
-                except (OSError, RuntimeError, TimeoutError) as exc:
-                    # A stale or recycled PID must not poison stop_app —
-                    # fall through to the live process scan.
-                    logger.debug(f"Tracked-PID terminate failed for {package_name}: {exc}")
+            # Verify the live pid first — a recycled cached pid could belong to
+            # a different app now, and terminating it would kill the wrong app.
             pid = await self._resolve_pid(package_name)
             await self._terminate_pid(pid, kill=True)
+            self._launched_pids.pop(package_name, None)
         return True
 
     async def install_app(self, app_path: Path) -> str:

@@ -42,7 +42,6 @@ except Exception:
     load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 from artemis.runtime import trace_store
-from artemis.drivers.ios.discovery import BOOTED_SIMULATOR_ID
 from artemis.runtime.adb_endpoint import normalize_device_platform
 from mcp_server.notifiers import notify
 from mcp_server.utils import device_utils
@@ -178,8 +177,8 @@ async def run_task(
         if is_ios:
             # The iOS driver resolves "booted" against `simctl` at connect
             # time; an explicit UDID was already validated at admission.
-            target_serial = device_serial or BOOTED_SIMULATOR_ID
-            print(f"✅ Targeting iOS simulator: '{target_serial}'.")
+            target_serial = device_serial or "booted"
+            print(f"✅ Targeting iOS device: '{target_serial}'.")
         elif device_serial:
             target_serial = device_serial
             if connected_devices and device_serial not in connected_devices:
@@ -232,8 +231,8 @@ async def run_task(
             config_builder.with_adb_server(host=settings.ADB_HOST, port=settings.ADB_PORT)
 
         if is_ios:
-            config_builder.for_ios_simulator(
-                device_id=target_serial or BOOTED_SIMULATOR_ID,
+            config_builder.for_ios_device(
+                device_id=target_serial or "booted",
                 workspace_path=ios_workspace,
             )
         elif target_serial:
@@ -453,7 +452,7 @@ if __name__ == "__main__":
         "--platform",
         default="android",
         choices=["android", "ios"],
-        help="Target platform ('android' default; 'ios' targets a Simulator via Xcode)",
+        help="Target platform ('android' default; 'ios' targets simulators or physical devices via Xcode/devicectl)",
     )
     parser.add_argument(
         "--ios-workspace",

@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 import signal
 import subprocess
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -219,6 +220,63 @@ async def test_startup_cancellation_reaps_child(recorder_env, monkeypatch, tmp_p
 
     assert proc.returncode is not None
     assert signal.SIGINT in proc.signals
+
+
+@pytest.mark.asyncio
+async def test_cancelled_probe_after_marker_reaps_child(recorder_env, monkeypatch, tmp_path):
+    """Cancelling during the dimension probe must not leak the recorder child."""
+    proc = FakeRecorderProcess()  # marker arrives instantly
+    patch_spawn(monkeypatch, [proc])
+    probe_entered = threading.Event()
+    probe_gate = threading.Event()
+
+    async def gated_probe(device_id):
+        probe_entered.set()
+        while not probe_gate.is_set():
+            await asyncio.sleep(0.005)
+        return (1206, 2622)
+
+    monkeypatch.setattr(rec, "probe_display_dimensions", gated_probe)
+    recorder = IosScreenRecorder(UDID)
+
+    task = asyncio.create_task(recorder.start(output_dir=tmp_path))
+    try:
+        assert await asyncio.to_thread(probe_entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()  # still gated inside the probe await
+    finally:
+        probe_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    session = recorder.session
+    assert session is not None and not session.is_active
+    assert proc.returncode is not None
+    assert signal.SIGINT in proc.signals
+    assert session.stderr_task is None or session.stderr_task.done()
+
+
+@pytest.mark.asyncio
+async def test_probe_failure_after_marker_reaps_child(recorder_env, monkeypatch, tmp_path):
+    """A dimension-probe error after the marker must reap the owned child."""
+    proc = FakeRecorderProcess()
+    patch_spawn(monkeypatch, [proc])
+
+    async def boom(device_id):
+        raise RuntimeError("display probe exploded")
+
+    monkeypatch.setattr(rec, "probe_display_dimensions", boom)
+    recorder = IosScreenRecorder(UDID)
+
+    with pytest.raises(RuntimeError, match="display probe exploded"):
+        await recorder.start(output_dir=tmp_path)
+
+    session = recorder.session
+    assert session is not None and not session.is_active
+    assert proc.returncode is not None
+    assert signal.SIGINT in proc.signals
+    assert session.stderr_task is None or session.stderr_task.done()
 
 
 @pytest.mark.asyncio
@@ -666,3 +724,77 @@ def test_parse_display_dimensions_uses_iosurface_not_default_dims():
     assert rec._parse_display_dimensions(rotated) == (2622, 1206)
     assert rec._parse_display_dimensions("Port:\n    Class: Unknown\n") is None
     assert rec._parse_display_dimensions("") is None
+
+
+@pytest.mark.asyncio
+async def test_young_crash_loop_caps_respawns_and_stops(recorder_env, monkeypatch, tmp_path):
+    """Spawns that succeed then die young must bound the crash loop.
+
+    Every fake proc delivers the 'Recording started' marker (spawn succeeds)
+    and then exits immediately — the watchdog's young-crash counter must stop
+    the respawn loop at MAX_CONSECUTIVE_FAILURES instead of spawning forever.
+    """
+    created: list[FakeRecorderProcess] = []
+
+    async def spawn(*argv, **kwargs):
+        proc = FakeRecorderProcess()
+        created.append(proc)
+
+        def die_young():
+            if proc.returncode is None:
+                proc.returncode = 1
+                proc._exit.set()
+
+        asyncio.get_running_loop().call_later(0.01, die_young)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    recorder = IosScreenRecorder(UDID)
+
+    session = await recorder.start(output_dir=tmp_path)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and session.is_active:
+        await asyncio.sleep(0.02)
+
+    assert not session.is_active
+    assert len(created) <= rec.MAX_CONSECUTIVE_FAILURES + 1
+    assert any("recovery limit" in error for error in session.errors)
+    # No orphan process survives the cap.
+    assert all(proc.returncode is not None for proc in created)
+
+
+@pytest.mark.asyncio
+async def test_finalize_cancellation_reaps_child_and_drops_part(tmp_path, monkeypatch):
+    """Cancelling finalize must reap the ffmpeg child and remove its .part."""
+    source = tmp_path / "segment_0000.mov"
+    source.write_bytes(b"mov")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    reaped: list[object] = []
+
+    class _Proc:
+        returncode = None
+
+        async def communicate(self):
+            entered.set()
+            await release.wait()
+            return b"", b""
+
+    async def fake_exec(*args, **kwargs):
+        return _Proc()
+
+    async def fake_reap(process):
+        reaped.append(process)
+
+    monkeypatch.setattr(rec.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(rec, "reap_process", fake_reap)
+    output = tmp_path / "segment_0000.mp4"
+    task = asyncio.create_task(finalize_mov_to_mp4(source, output, 100, 200, 1.0))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(reaped) == 1
+    assert not output.exists()
+    assert not (tmp_path / "segment_0000.part.mp4").exists()

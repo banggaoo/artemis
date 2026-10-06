@@ -65,10 +65,16 @@ export class SystemService {
   public isEnvironmentReady = computed(() => {
     const py = this.pythonProbe();
     const cfg = this.configProbe();
-    const adb = this.adbProbe();
-    const tc = this.toolchainProbe();
     const pyOk = py?.status === 'pass';
     const cfgOk = cfg?.status === 'pass';
+    if (this.selectedIosDevice() != null) {
+      // An iOS target replaces the ADB toolchain gates: it needs macOS with
+      // Xcode 27+, never an ADB installation.
+      const iosOk = this.iosProbe()?.metadata?.['xcode_27_or_newer'] === true;
+      return pyOk && cfgOk && this.osType() === 'darwin' && iosOk;
+    }
+    const adb = this.adbProbe();
+    const tc = this.toolchainProbe();
     const adbInstalled = adb?.metadata?.['installed'] ?? (adb?.status !== 'fail');
     const tcOk = tc?.status === 'pass' || tc?.is_blocker === false;
     return pyOk && cfgOk && adbInstalled && tcOk;
@@ -148,6 +154,22 @@ export class SystemService {
           screen_resolution: null,
           is_locked: null,
           is_emulator: true,
+          platform: 'ios',
+        });
+      }
+    }
+    if (iosMeta && Array.isArray(iosMeta['connected_physical_devices'])) {
+      for (const p of iosMeta['connected_physical_devices'] as any[]) {
+        if (!p?.udid) continue;
+        devices.push({
+          serial: p.udid,
+          state: 'device',
+          model: p.name ?? null,
+          product: p.os_version ? `iOS ${p.os_version}` : 'iOS physical device',
+          android_version: null,
+          screen_resolution: null,
+          is_locked: null,
+          is_emulator: false,
           platform: 'ios',
         });
       }
@@ -538,7 +560,10 @@ export class SystemService {
     // apply it optimistically since UDID validation can take seconds and the
     // error path below reverts it if the server rejects the pick.
     if (platform === 'ios') {
-      const dev = this.connectedDevices().find(d => d.serial === serial) ?? null;
+      const dev =
+        this.connectedDevices().find(
+          d => d.serial === serial && d.platform === 'ios'
+        ) ?? null;
       this.selectedIosDevice.set(dev);
     }
     this.isLoading.set(true);
@@ -548,7 +573,9 @@ export class SystemService {
           if (platform === 'ios') {
             this.selectedIosDevice.set(
               res?.status === 'success'
-                ? this.connectedDevices().find(d => d.serial === serial) ?? this.selectedIosDevice()
+                ? this.connectedDevices().find(
+                    d => d.serial === serial && d.platform === 'ios'
+                  ) ?? this.selectedIosDevice()
                 : null
             );
           } else if (platform === 'android') {

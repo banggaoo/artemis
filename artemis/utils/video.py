@@ -319,8 +319,14 @@ def _probe_video_segment_cv2(video_path: Path) -> dict[str, float | int]:
     }
 
 
-async def probe_video_segment(video_path: Path) -> dict[str, float | int]:
-    """Read duration and coded dimensions for a finalized segment."""
+async def probe_video_segment(
+    video_path: Path, *, timeout_seconds: float | None = None
+) -> dict[str, float | int]:
+    """Read duration and coded dimensions for a finalized segment.
+
+    ``timeout_seconds`` bounds the owned ffprobe child: on timeout or
+    cancellation the subprocess is killed and drained before propagating.
+    """
     try:
         process = await asyncio.create_subprocess_exec(
             get_ffprobe_path(),
@@ -336,7 +342,23 @@ async def probe_video_segment(video_path: Path) -> dict[str, float | int]:
         )
     except FileNotFoundError:
         return await asyncio.to_thread(_probe_video_segment_cv2, video_path)
-    stdout, _stderr = await process.communicate()
+    if timeout_seconds is None:
+        # Default callers keep the original unbounded communicate behaviour.
+        stdout, _stderr = await process.communicate()
+    else:
+        try:
+            stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout_seconds)
+        except (TimeoutError, asyncio.CancelledError):
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            try:
+                await process.communicate()
+            except (OSError, RuntimeError, TimeoutError) as drain_error:
+                logger.debug(f"ffprobe drain after kill failed: {drain_error}")
+            raise
     if process.returncode != 0:
         return {}
     try:
@@ -397,6 +419,7 @@ async def write_recording_manifest(
     output_dir: Path,
     mp4_paths: list[Path],
     segment_offsets: dict[Path, float] | None = None,
+    probe_timeout_seconds: float | None = None,
 ) -> Path | None:
     """Write the browser playlist used for orientation-aware playback.
 
@@ -418,7 +441,13 @@ async def write_recording_manifest(
     for path in mp4_paths:
         if not path.exists():
             continue
-        metadata = await probe_video_segment(path)
+        # Forward the timeout only when supplied so default callers keep the
+        # historical probe signature.
+        metadata = await (
+            probe_video_segment(path, timeout_seconds=probe_timeout_seconds)
+            if probe_timeout_seconds is not None
+            else probe_video_segment(path)
+        )
         duration = float(metadata.get("duration", 0))
         width = int(metadata.get("width", 0))
         height = int(metadata.get("height", 0))

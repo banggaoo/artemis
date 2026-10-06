@@ -182,9 +182,7 @@ class Agent(AgentBase):
         # Android read-only ADB probes have no iOS equivalent yet; native
         # simctl recording is supported and honors the configured flag.
         self._config = self._config.model_copy(update={"disable_device_probes": True})
-        publish_startup_progress(
-            "device_ready", "iOS device selected", session_id=self._session_id
-        )
+        publish_startup_progress("device_ready", "iOS device selected", session_id=self._session_id)
         asyncio.create_task(self._prewarm_llm_connections(api_key))
         self._initialized = True
         return True

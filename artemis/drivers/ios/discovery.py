@@ -135,9 +135,7 @@ async def plist_to_json(payload: bytes, timeout: float = 30.0) -> bytes:
         await reap_process(process)
         raise
     if process.returncode != 0:
-        raise RuntimeError(
-            f"plutil conversion failed: {stderr.decode(errors='replace').strip()}"
-        )
+        raise RuntimeError(f"plutil conversion failed: {stderr.decode(errors='replace').strip()}")
     return stdout
 
 
@@ -230,9 +228,7 @@ def list_ios_simulators_sync(
 DEVICECTL_ENUMERATE_TIMEOUT = 20.0
 
 
-async def devicectl_screenshot(
-    device_id: str, destination: Path, timeout: float
-) -> None:
+async def devicectl_screenshot(device_id: str, destination: Path, timeout: float) -> None:
     """Capture one PNG frame from a paired device via ``devicectl``."""
     await run_xcrun(
         "devicectl",
@@ -265,6 +261,29 @@ def _device_property(device: dict[str, Any], section: str, key: str) -> Any:
     return nested.get(key) if isinstance(nested, dict) else None
 
 
+def _modern_property(device: dict[str, Any], section: str, key: str) -> Any:
+    """Read ``properties.<section>.<key>`` from Xcode 27's devicectl shape.
+
+    The modern ``properties`` map uses short section names (``hardware``,
+    ``software``, ``state``, ``connection``) rather than the deprecated
+    ``hardwareProperties``/``deviceProperties``/``connectionProperties``
+    spellings. Sections may be present-but-null, so guard every hop.
+    """
+    properties = device.get("properties")
+    if not isinstance(properties, dict):
+        return None
+    nested = properties.get(section)
+    return nested.get(key) if isinstance(nested, dict) else None
+
+
+def _modern_os_version(device: dict[str, Any]) -> Any:
+    """``properties.software.osVersionNumber`` may carry a stringValue map."""
+    version = _modern_property(device, "software", "osVersionNumber")
+    if isinstance(version, dict):
+        return version.get("stringValue") or version.get("string")
+    return version
+
+
 def parse_devicectl_devices(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Flatten ``devicectl list devices --json-output -`` into device entries."""
     devices = []
@@ -277,28 +296,32 @@ def parse_devicectl_devices(payload: dict[str, Any]) -> list[dict[str, Any]]:
     for device in entries:
         if not isinstance(device, dict):
             continue
-        udid = _device_property(device, "hardwareProperties", "udid")
+        udid = (
+            _device_property(device, "hardwareProperties", "udid")
+            or _modern_property(device, "hardware", "udid")
+            or device.get("identifier")
+        )
         if not udid:
             continue
         devices.append(
             {
                 "udid": udid,
-                "name": _device_property(device, "deviceProperties", "name"),
-                "os_version": _device_property(
-                    device, "deviceProperties", "osVersionNumber"
-                ),
-                "platform": _device_property(device, "hardwareProperties", "platform"),
-                "reality": _device_property(device, "hardwareProperties", "reality"),
-                "product_type": _device_property(
-                    device, "hardwareProperties", "productType"
-                ),
-                "connection_state": _device_property(
-                    device, "connectionProperties", "tunnelState"
-                ),
-                "pairing_state": _device_property(
-                    device, "connectionProperties", "pairingState"
-                ),
-                "visibility": device.get("visibilityClass"),
+                "name": _device_property(device, "deviceProperties", "name")
+                or _modern_property(device, "state", "name"),
+                "os_version": _device_property(device, "deviceProperties", "osVersionNumber")
+                or _modern_os_version(device),
+                "platform": _device_property(device, "hardwareProperties", "platform")
+                or _modern_property(device, "hardware", "platform"),
+                "reality": _device_property(device, "hardwareProperties", "reality")
+                or _modern_property(device, "hardware", "reality"),
+                "product_type": _device_property(device, "hardwareProperties", "productType")
+                or _modern_property(device, "hardware", "productType"),
+                "connection_state": _device_property(device, "connectionProperties", "tunnelState")
+                or _modern_property(device, "connection", "state"),
+                "pairing_state": _device_property(device, "connectionProperties", "pairingState")
+                or _modern_property(device, "connection", "pairingState"),
+                "visibility": device.get("visibilityClass")
+                or _modern_property(device, "state", "visibilityClass"),
             }
         )
     return devices
@@ -316,7 +339,12 @@ async def list_core_devices(
             return cached
     try:
         raw = await run_xcrun(
-            "devicectl", "list", "devices", "--json-output", "-", timeout=DEVICECTL_ENUMERATE_TIMEOUT
+            "devicectl",
+            "list",
+            "devices",
+            "--json-output",
+            "-",
+            timeout=DEVICECTL_ENUMERATE_TIMEOUT,
         )
     except (OSError, RuntimeError, TimeoutError) as exc:
         logger.debug(f"devicectl device enumeration failed: {exc}")
@@ -360,10 +388,7 @@ def list_core_devices_sync(
 
 def is_physical_ios(device: dict[str, Any]) -> bool:
     """Whether a CoreDevice entry is a physical iPhone/iPad (not a simulator)."""
-    return (
-        device.get("platform") in ("iOS", "iPadOS")
-        and device.get("reality") == "physical"
-    )
+    return device.get("platform") in ("iOS", "iPadOS") and device.get("reality") == "physical"
 
 
 def physical_ios_ready(device: dict[str, Any]) -> bool:
@@ -392,13 +417,23 @@ def device_matches_identifier(device: dict[str, Any], identifier: str) -> bool:
 
 
 def find_physical_ios_device_sync(identifier: str) -> dict[str, Any] | None:
-    """Match a physical iOS device by UDID or exact name, or ``None``."""
+    """Match a physical iOS device by UDID or exact name, or ``None``.
+
+    Raises ``ValueError`` when the identifier matches more than one device —
+    silently picking the first would drive an arbitrary phone.
+    """
     devices = list_core_devices_sync()
     if devices is None or not identifier:
         return None
-    for device in devices:
-        if not is_physical_ios(device):
-            continue
-        if device_matches_identifier(device, identifier):
-            return device
-    return None
+    matches = [
+        device
+        for device in devices
+        if is_physical_ios(device) and device_matches_identifier(device, identifier)
+    ]
+    if len(matches) > 1:
+        udids = sorted(str(device.get("udid") or "?") for device in matches)
+        raise ValueError(
+            f"{len(matches)} physical iOS devices match {identifier!r} "
+            f"({', '.join(udids)}); use the device UDID instead."
+        )
+    return matches[0] if matches else None

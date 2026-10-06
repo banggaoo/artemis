@@ -329,9 +329,7 @@ def test_active_owner_is_discoverable_and_can_be_annotated(monkeypatch):
 def test_annotation_preserves_lock_scope(monkeypatch):
     """Annotating a scoped (e.g. iOS) owner must not strip its lock_scope."""
     monkeypatch.setenv("ARTEMIS_TASK_INGRESS", "daemon")
-    owner_lock = DeviceExecutionLock(
-        "00008100-000000000000001E", "iOS task", lock_scope="ios"
-    )
+    owner_lock = DeviceExecutionLock("00008100-000000000000001E", "iOS task", lock_scope="ios")
     owner_lock.acquire()
     try:
         assert DeviceExecutionLock.annotate_active_owner(

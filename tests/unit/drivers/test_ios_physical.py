@@ -17,6 +17,7 @@ import io
 import json
 from pathlib import Path
 import plistlib
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -122,7 +123,9 @@ def test_physical_classification_requires_ios_and_hardware():
 
 def test_find_physical_device_matches_udid_case_insensitively(monkeypatch):
     monkeypatch.setattr(
-        discovery, "list_core_devices_sync", lambda force_refresh=False: _parsed(PHYSICAL_IPHONE, SIMULATOR)
+        discovery,
+        "list_core_devices_sync",
+        lambda force_refresh=False: _parsed(PHYSICAL_IPHONE, SIMULATOR),
     )
     found = discovery.find_physical_ios_device_sync(IPHONE_UDID.lower())
     assert found is not None and found["udid"] == IPHONE_UDID
@@ -146,24 +149,27 @@ def driver(monkeypatch):
 @pytest.fixture(autouse=True)
 def _clean_wda_env(monkeypatch):
     for key in (
-        'ARTEMIS_IOS_WDA_URL',
-        'ARTEMIS_IOS_WDA_HOST',
-        'ARTEMIS_IOS_WDA_XCTESTRUN',
-        'ARTEMIS_IOS_WDA_BUNDLE_ID',
+        "ARTEMIS_IOS_WDA_URL",
+        "ARTEMIS_IOS_WDA_HOST",
+        "ARTEMIS_IOS_WDA_XCTESTRUN",
+        "ARTEMIS_IOS_WDA_BUNDLE_ID",
     ):
         monkeypatch.delenv(key, raising=False)
 
 
 @pytest.mark.asyncio
-async def test_physical_resolve_rejects_booted_and_empty_serials(driver):
-    driver._device_id = "booted"
+@pytest.mark.parametrize("serial", ["booted", " Booted ", "BOOTED", ""])
+async def test_physical_resolve_rejects_booted_and_empty_serials(driver, serial):
+    driver._device_id = serial
     with pytest.raises(ValueError, match="device-serial"):
         await driver._resolve_device()
 
 
 @pytest.mark.asyncio
 async def test_physical_resolve_pins_the_udid(driver, monkeypatch):
-    monkeypatch.setattr(physical_driver, "list_core_devices", _async_devices(_parsed(PHYSICAL_IPHONE, SIMULATOR)))
+    monkeypatch.setattr(
+        physical_driver, "list_core_devices", _async_devices(_parsed(PHYSICAL_IPHONE, SIMULATOR))
+    )
     candidate = await driver._resolve_device()
     assert candidate["udid"] == IPHONE_UDID
     assert driver.device_id == IPHONE_UDID
@@ -242,11 +248,20 @@ def _xcrun_payload_writer(payloads):
 class _FakeWda:
     """In-memory WebDriverAgent stand-in for driver interaction tests."""
 
-    def __init__(self, window=(100.0, 200.0), tree=None):
+    def __init__(
+        self,
+        window=(100.0, 200.0),
+        tree=None,
+        device_name="Jane's iPhone",
+        is_simulator=False,
+    ):
         self.session_id = None
         self.base_url = "http://fake-wda:8100"
         self.window = window
         self.tree = tree if tree is not None else {"type": "Application", "children": []}
+        self.device_name = device_name
+        self.is_simulator = is_simulator
+        self.opened_sessions = 0
         self.tapped: list[tuple[float, float, int]] = []
         self.swiped: list[tuple[float, float, float, float, int]] = []
         self.typed: list[str] = []
@@ -263,7 +278,11 @@ class _FakeWda:
         Image.new("RGB", (width, height), color="red").save(buffer, format="PNG")
         return buffer.getvalue()
 
+    async def device_info(self, timeout=10.0):
+        return {"name": self.device_name, "isSimulator": self.is_simulator}
+
     async def open_session(self):
+        self.opened_sessions += 1
         self.session_id = "wda-session"
         return self.session_id
 
@@ -318,8 +337,14 @@ async def test_launch_records_the_pid_from_devicectl_json(connected_driver, monk
     async def fake_xcrun(*arguments, timeout=30.0):
         calls.append(arguments)
         return json.dumps(
-            {"result": {"process": {"processIdentifier": 4242,
-                                    "executable": "file:///Apps/Example.app/Example"}}}
+            {
+                "result": {
+                    "process": {
+                        "processIdentifier": 4242,
+                        "executable": "file:///Apps/Example.app/Example",
+                    }
+                }
+            }
         ).encode()
 
     monkeypatch.setattr(physical_driver, "run_xcrun", fake_xcrun)
@@ -332,19 +357,175 @@ async def test_launch_records_the_pid_from_devicectl_json(connected_driver, monk
 
 @pytest.mark.asyncio
 async def test_stop_app_terminates_the_tracked_pid(connected_driver, monkeypatch):
+    """A cached launch pid wins only after it is re-verified against the app's URL."""
     connected_driver._launched_pids["com.example.app"] = 4242
     calls = []
+    payloads = {
+        "apps": {
+            "result": {
+                "apps": [
+                    {
+                        "bundleIdentifier": "com.example.app",
+                        "url": "file:///var/containers/X/Example.app/",
+                    }
+                ]
+            }
+        },
+        "processes": {
+            "result": {
+                "runningProcesses": [
+                    {"processIdentifier": 7, "executable": "file:///usr/libexec/other"},
+                    {
+                        "processIdentifier": 4242,
+                        "executable": "file:///private/var/containers/X/Example.app/Example",
+                    },
+                ]
+            }
+        },
+    }
 
     async def fake_xcrun(*arguments, timeout=30.0):
-        calls.append(arguments)
-        return b"{}"
+        calls.append(list(arguments))
+        args = list(arguments)
+        if "--json-output" in args and args[args.index("--json-output") + 1] != "-":
+            keys = [a for a in args if a in payloads]
+            Path(args[args.index("--json-output") + 1]).write_text(
+                json.dumps(payloads.get(keys[0], {}) if keys else {})
+            )
+        return b""
 
     monkeypatch.setattr(physical_driver, "run_xcrun", fake_xcrun)
     assert await connected_driver.stop_app("com.example.app")
-    terminate = calls[0]
-    assert terminate[:5] == ("devicectl", "device", "process", "terminate", "--device")
+    terminate = next(c for c in calls if "terminate" in c)
+    assert terminate[:5] == ["devicectl", "device", "process", "terminate", "--device"]
     assert terminate[terminate.index("--pid") + 1] == "4242"
     assert connected_driver._launched_pids == {}
+
+
+@pytest.mark.asyncio
+async def test_stop_app_ignores_a_stale_cached_pid(connected_driver, monkeypatch):
+    """A recycled cached pid now owned by a different app must not be killed."""
+    connected_driver._launched_pids["com.example.app"] = 4242
+    calls = []
+    payloads = {
+        "apps": {
+            "result": {
+                "apps": [
+                    {
+                        "bundleIdentifier": "com.example.app",
+                        "url": "file:///var/containers/X/Example.app/",
+                    }
+                ]
+            }
+        },
+        "processes": {
+            "result": {
+                "runningProcesses": [
+                    # pid 4242 was recycled into an unrelated binary.
+                    {
+                        "processIdentifier": 4242,
+                        "executable": "file:///usr/sbin/otherd",
+                    },
+                    {
+                        "processIdentifier": 42,
+                        "executable": "file:///var/containers/X/Example.app/Example",
+                    },
+                ]
+            }
+        },
+    }
+
+    async def fake_xcrun(*arguments, timeout=30.0):
+        calls.append(list(arguments))
+        args = list(arguments)
+        if "--json-output" in args and args[args.index("--json-output") + 1] != "-":
+            keys = [a for a in args if a in payloads]
+            Path(args[args.index("--json-output") + 1]).write_text(
+                json.dumps(payloads.get(keys[0], {}) if keys else {})
+            )
+        return b""
+
+    monkeypatch.setattr(physical_driver, "run_xcrun", fake_xcrun)
+    assert await connected_driver.stop_app("com.example.app")
+    terminated = [c[c.index("--pid") + 1] for c in calls if "terminate" in c]
+    assert terminated == ["42"]
+
+
+@pytest.mark.asyncio
+async def test_stop_app_never_matches_sibling_app_prefixes(connected_driver, monkeypatch):
+    """'Example.appOther' must not match the 'Example.app' URL prefix."""
+    calls = []
+    payloads = {
+        "apps": {
+            "result": {
+                "apps": [
+                    {
+                        "bundleIdentifier": "com.example.app",
+                        "url": "file:///var/containers/X/Example.app/",
+                    }
+                ]
+            }
+        },
+        "processes": {
+            "result": {
+                "runningProcesses": [
+                    {
+                        "processIdentifier": 99,
+                        "executable": "file:///var/containers/X/Example.appOther/Other",
+                    },
+                ]
+            }
+        },
+    }
+
+    async def fake_xcrun(*arguments, timeout=30.0):
+        calls.append(list(arguments))
+        args = list(arguments)
+        if "--json-output" in args and args[args.index("--json-output") + 1] != "-":
+            keys = [a for a in args if a in payloads]
+            Path(args[args.index("--json-output") + 1]).write_text(
+                json.dumps(payloads.get(keys[0], {}) if keys else {})
+            )
+        return b""
+
+    monkeypatch.setattr(physical_driver, "run_xcrun", fake_xcrun)
+    with pytest.raises(ValueError, match="No running process"):
+        await connected_driver.stop_app("com.example.app")
+    assert not any("terminate" in c for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_stop_app_rejects_a_missing_app_url(connected_driver, monkeypatch):
+    """An installed-app entry without a usable URL cannot verify a victim."""
+    calls = []
+    payloads = {
+        "apps": {"result": {"apps": [{"bundleIdentifier": "com.example.app", "url": None}]}},
+        "processes": {
+            "result": {
+                "runningProcesses": [
+                    {
+                        "processIdentifier": 42,
+                        "executable": "file:///var/containers/X/Example.app/Example",
+                    },
+                ]
+            }
+        },
+    }
+
+    async def fake_xcrun(*arguments, timeout=30.0):
+        calls.append(list(arguments))
+        args = list(arguments)
+        if "--json-output" in args and args[args.index("--json-output") + 1] != "-":
+            keys = [a for a in args if a in payloads]
+            Path(args[args.index("--json-output") + 1]).write_text(
+                json.dumps(payloads.get(keys[0], {}) if keys else {})
+            )
+        return b""
+
+    monkeypatch.setattr(physical_driver, "run_xcrun", fake_xcrun)
+    with pytest.raises(ValueError, match="not installed|could not be determined"):
+        await connected_driver.stop_app("com.example.app")
+    assert not any("terminate" in c for c in calls)
 
 
 @pytest.mark.asyncio
@@ -398,8 +579,21 @@ async def test_stop_app_without_process_fails_clearly(connected_driver, monkeypa
     monkeypatch.setattr(
         physical_driver,
         "run_xcrun",
-        _xcrun_payload_writer({"apps": {"result": {"apps": []}},
-                               "processes": {"result": {"runningProcesses": []}}}),
+        _xcrun_payload_writer(
+            {
+                "apps": {
+                    "result": {
+                        "apps": [
+                            {
+                                "bundleIdentifier": "com.example.app",
+                                "url": "file:///var/containers/X/Example.app/",
+                            }
+                        ]
+                    }
+                },
+                "processes": {"result": {"runningProcesses": []}},
+            }
+        ),
     )
     with pytest.raises(ValueError, match="No running process"):
         await connected_driver.stop_app("com.example.app")
@@ -409,9 +603,7 @@ async def test_stop_app_without_process_fails_clearly(connected_driver, monkeypa
 async def test_install_accepts_signed_app_directories(connected_driver, monkeypatch, tmp_path):
     app = tmp_path / "Writer.app"
     app.mkdir()
-    (app / "Info.plist").write_bytes(
-        plistlib.dumps({"CFBundleIdentifier": "com.example.writer"})
-    )
+    (app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.example.writer"}))
     calls = []
 
     async def fake_xcrun(*arguments, timeout=30.0):
@@ -470,9 +662,7 @@ async def test_list_apps_parses_devicectl_json(connected_driver, monkeypatch):
     async def fake_xcrun(*arguments, timeout=30.0):
         args = list(arguments)
         if "--json-output" in args:
-            Path(args[args.index("--json-output") + 1]).write_text(
-                json.dumps({"result": payload})
-            )
+            Path(args[args.index("--json-output") + 1]).write_text(json.dumps({"result": payload}))
         return b""
 
     monkeypatch.setattr(physical_driver, "run_xcrun", fake_xcrun)
@@ -519,10 +709,10 @@ async def test_recorder_polls_frames_and_assembles_mp4(tmp_path, monkeypatch):
         output.write_bytes(b"mp4")
         return 0, b""
 
-    async def fake_probe(path):
+    async def fake_probe(path, timeout_seconds=None):
         return {"duration": 1.0, "width": 100, "height": 200}
 
-    async def fake_manifest(output_dir, paths, offsets):
+    async def fake_manifest(output_dir, paths, offsets, probe_timeout_seconds=None):
         manifest = Path(output_dir) / "manifest.json"
         manifest.write_text("{}")
         return manifest
@@ -773,15 +963,15 @@ async def test_disconnect_closes_wda_and_terminates_runner(connected_driver, mon
     assert connected_driver._wda is None
     assert connected_driver._session_key is None
     assert connected_driver._wda_runner_pid is None
-    assert any(
-        "terminate" in args and str(777) in args for args in calls
-    )
+    assert any("terminate" in args and str(777) in args for args in calls)
 
 
 @pytest.mark.asyncio
 async def test_connect_establishes_wda_session(driver, monkeypatch):
     client = _FakeWda()
-    monkeypatch.setattr(physical_driver, "list_core_devices", _async_devices(_parsed(PHYSICAL_IPHONE)))
+    monkeypatch.setattr(
+        physical_driver, "list_core_devices", _async_devices(_parsed(PHYSICAL_IPHONE))
+    )
     monkeypatch.setattr(driver, "_ensure_wda", _async_return(client))
     monkeypatch.setattr(driver, "_require_ios_host", _async_return(None))
     await driver.connect()
@@ -897,3 +1087,529 @@ def test_android_selection_is_unchanged(monkeypatch):
     monkeypatch.delenv("ARTEMIS_MOCK_DRIVER", raising=False)
     driver = factory.create_driver(ctx)
     assert isinstance(driver, AndroidAdbDriver)
+
+
+# --- Xcode 27 devicectl schema and ambiguity --------------------------------
+
+
+def _modern_devicectl_device(
+    udid,
+    name="Device",
+    os_version="27.0",
+    platform="iOS",
+    reality="physical",
+    state="connected",
+    pairing="paired",
+    visibility="default",
+):
+    """One entry in Xcode 27's modern ``properties``-only devicectl shape."""
+    return {
+        "identifier": udid,
+        "properties": {
+            "hardware": {
+                "udid": udid,
+                "platform": platform,
+                "reality": reality,
+                "productType": "iPhone17,2",
+            },
+            "state": {"name": name, "visibilityClass": visibility},
+            "software": {
+                "osVersionNumber": {
+                    "components": [27, 0, 0],
+                    "stringValue": os_version,
+                }
+            },
+            "connection": {"pairingState": pairing, "state": state},
+        },
+    }
+
+
+def test_devicectl_devices_read_the_modern_properties_shape():
+    modern = _modern_devicectl_device(IPHONE_UDID, name="Test Phone")
+    devices = discovery.parse_devicectl_devices(_devicectl_payload(modern))
+    assert devices == [
+        {
+            "udid": IPHONE_UDID,
+            "name": "Test Phone",
+            "os_version": "27.0",
+            "platform": "iOS",
+            "reality": "physical",
+            "product_type": "iPhone17,2",
+            "connection_state": "connected",
+            "pairing_state": "paired",
+            "visibility": "default",
+        }
+    ]
+
+
+def test_devicectl_devices_tolerate_null_modern_sections():
+    modern = _modern_devicectl_device(IPHONE_UDID)
+    modern["properties"]["software"] = None
+    modern["properties"]["state"] = None
+    devices = discovery.parse_devicectl_devices(_devicectl_payload(modern))
+    assert devices[0]["udid"] == IPHONE_UDID
+    assert devices[0]["os_version"] is None
+    assert devices[0]["name"] is None
+
+
+def test_devicectl_devices_prefer_legacy_values_when_both_present():
+    device = _devicectl_device(IPHONE_UDID, name="Legacy Name", os_version="26.0")
+    device["properties"] = _modern_devicectl_device(
+        IPHONE_UDID, name="Modern Name", os_version="27.0"
+    )["properties"]
+    parsed = _parsed(device)[0]
+    assert parsed["name"] == "Legacy Name"
+    assert parsed["os_version"] == "26.0"
+
+
+def test_find_physical_rejects_ambiguous_names(monkeypatch):
+    monkeypatch.setattr(
+        discovery,
+        "list_core_devices_sync",
+        lambda force_refresh=False: _parsed(
+            _devicectl_device(IPHONE_UDID, name="Office iPhone"),
+            _devicectl_device(IPAD_UDID, name="Office iPhone", platform="iPadOS"),
+        ),
+    )
+    with pytest.raises(ValueError, match="UDID"):
+        discovery.find_physical_ios_device_sync("Office iPhone")
+    # The exact UDID still resolves uniquely.
+    found = discovery.find_physical_ios_device_sync(IPAD_UDID)
+    assert found is not None and found["udid"] == IPAD_UDID
+
+
+@pytest.mark.asyncio
+async def test_physical_resolve_rejects_duplicate_names(driver, monkeypatch):
+    driver._device_id = "Office iPhone"
+    monkeypatch.setattr(
+        physical_driver,
+        "list_core_devices",
+        _async_devices(
+            _parsed(
+                _devicectl_device(IPHONE_UDID, name="Office iPhone"),
+                _devicectl_device(IPAD_UDID, name="Office iPhone", platform="iPadOS"),
+            )
+        ),
+    )
+    with pytest.raises(ValueError, match="UDID"):
+        await driver._resolve_device()
+
+
+# --- WebDriverAgent session safety ----------------------------------------- #
+
+
+class _WdaResponder:
+    """Scripted urllib stub that records requests and can block on demand."""
+
+    def __init__(self):
+        self.requests: list[tuple[str, str]] = []
+        self.responses: dict[str, object] = {}
+        self.blockers: dict[str, threading.Event] = {}
+        self.entered: dict[str, threading.Event] = {}
+
+    class _Response:
+        def __init__(self, raw):
+            self._raw = raw
+
+        def read(self):
+            return self._raw
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def set(self, suffix, payload):
+        self.responses[suffix] = payload
+
+    def block_on(self, suffix):
+        self.blockers[suffix] = threading.Event()
+        self.entered[suffix] = threading.Event()
+
+    def release(self, suffix):
+        self.blockers[suffix].set()
+
+    def urlopen(self, request, timeout):
+        method = request.get_method()
+        url = request.full_url
+        for suffix, event in self.entered.items():
+            if url.endswith(suffix):
+                event.set()
+                self.blockers[suffix].wait(timeout=10)
+        self.requests.append((method, url))
+        for suffix, payload in self.responses.items():
+            if url.endswith(suffix):
+                raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+                return self._Response(raw)
+        return self._Response(json.dumps({"value": {}}).encode())
+
+
+@pytest.fixture
+def responder(monkeypatch):
+    stub = _WdaResponder()
+    monkeypatch.setattr(wda.urllib.request, "urlopen", stub.urlopen)
+    return stub
+
+
+def test_normalize_wda_url_keeps_the_port_in_the_authority():
+    assert wda.normalize_wda_url("http://localhost/proxy/wda") == "http://localhost:8100/proxy/wda"
+    assert (
+        wda.normalize_wda_url("http://localhost:9000/proxy/wda")
+        == "http://localhost:9000/proxy/wda"
+    )
+    assert wda.normalize_wda_url("http://[fd20::1]/wda") == "http://[fd20::1]:8100/wda"
+
+
+@pytest.mark.asyncio
+async def test_wda_status_surfaces_the_outer_session_id(responder):
+    responder.set(
+        "/status",
+        {"value": {"ready": True, "build": {}}, "sessionId": "foreign-777"},
+    )
+    status = await WdaClient("http://wda.test:8100").status()
+    assert status == {"ready": True, "build": {}, "sessionId": "foreign-777"}
+
+
+@pytest.mark.asyncio
+async def test_wda_status_rejects_non_json_responses(responder):
+    """HTML/bytes from a foreign service on the port must not pass as WDA."""
+    responder.set("/status", b"<html><body>proxy error</body></html>")
+    client = WdaClient("http://wda.test:8100")
+    assert await client.status() is None
+
+
+@pytest.mark.asyncio
+async def test_open_session_refuses_a_foreign_active_session(responder):
+    responder.set("/status", {"value": {"ready": True}, "sessionId": "someone-elses"})
+    client = WdaClient("http://wda.test:8100")
+    with pytest.raises(RuntimeError, match="Refusing to replace"):
+        await client.open_session()
+    methods = {m for m, _url in responder.requests}
+    assert methods == {"GET"}  # status only — no POST, no DELETE
+    assert client.session_id is None
+
+
+@pytest.mark.asyncio
+async def test_open_session_reuses_its_own_session(responder):
+    responder.set("/status", {"value": {"ready": True}, "sessionId": None})
+    responder.set("/session", {"value": {"sessionId": "owned-1"}})
+    client = WdaClient("http://wda.test:8100")
+    first = await client.open_session()
+    again = await client.open_session()
+    assert first == again == "owned-1"
+    posts = [u for m, u in responder.requests if m == "POST"]
+    assert len(posts) == 1
+
+
+@pytest.mark.asyncio
+async def test_open_session_creates_after_a_null_session_status(responder):
+    responder.set("/status", {"value": {"ready": True}, "sessionId": None})
+    responder.set("/session", {"value": {"sessionId": "fresh-1"}})
+    client = WdaClient("http://wda.test:8100")
+    assert await client.open_session() == "fresh-1"
+    assert client.session_id == "fresh-1"
+
+
+@pytest.mark.asyncio
+async def test_request_cancellation_drains_the_blocking_call(responder):
+    """A cancelled input must not leave the urllib call racing the release."""
+    client = WdaClient("http://wda.test:8100")
+    responder.block_on("/session/s1/actions")
+    responder.set("/session/s1/actions", {"value": {}})
+
+    task = asyncio.create_task(client._request("POST", "/session/s1/actions", {}))
+    try:
+        # Event.wait blocks a worker thread, never the loop — the request
+        # coroutine must already be inside urlopen before we cancel it.
+        entered = responder.entered["/session/s1/actions"]
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)  # let the cancellation land on the task
+        assert not task.done()  # still draining the blocked HTTP call
+    finally:
+        responder.release("/session/s1/actions")
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The drained request finished before cancellation propagated.
+    assert ("POST", "http://wda.test:8100/session/s1/actions") in responder.requests
+
+
+@pytest.mark.asyncio
+async def test_open_session_cancellation_deletes_the_orphaned_session(responder):
+    client = WdaClient("http://wda.test:8100")
+    responder.set("/status", {"value": {"ready": True}, "sessionId": None})
+    responder.block_on("/session")
+    responder.set("/session", {"value": {"sessionId": "orphan-9"}})
+
+    task = asyncio.create_task(client.open_session())
+    try:
+        entered = responder.entered["/session"]
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+    finally:
+        responder.release("/session")
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    deletes = [u for m, u in responder.requests if m == "DELETE"]
+    assert deletes == ["http://wda.test:8100/session/orphan-9"]
+    assert client.session_id is None
+
+
+@pytest.mark.asyncio
+async def test_device_info_rejects_non_dict_responses(responder):
+    responder.set("/wda/device/info", b"not-json")
+    client = WdaClient("http://wda.test:8100")
+    with pytest.raises(RuntimeError, match="non-JSON"):
+        await client.device_info()
+
+
+@pytest.mark.asyncio
+async def test_device_info_returns_the_dict(responder):
+    responder.set(
+        "/wda/device/info",
+        {"value": {"name": "Test Phone", "isSimulator": False, "uuid": "iv"}},
+    )
+    info = await WdaClient("http://wda.test:8100").device_info()
+    assert info["name"] == "Test Phone"
+    assert info["isSimulator"] is False
+
+
+# --- Connect identity verification ----------------------------------------- #
+
+
+def _connect_stubs(driver, monkeypatch, client):
+    monkeypatch.setattr(
+        physical_driver, "list_core_devices", _async_devices(_parsed(PHYSICAL_IPHONE))
+    )
+    monkeypatch.setattr(driver, "_ensure_wda", _async_return(client))
+    monkeypatch.setattr(driver, "_require_ios_host", _async_return(None))
+
+
+@pytest.mark.asyncio
+async def test_connect_verifies_the_wda_endpoint_identity(driver, monkeypatch):
+    client = _FakeWda(device_name="Jane's iPhone")
+    _connect_stubs(driver, monkeypatch, client)
+    await driver.connect()
+    assert driver._session_key == "wda-session"
+    assert client.opened_sessions == 1
+
+
+@pytest.mark.asyncio
+async def test_connect_rejects_a_wda_on_the_wrong_device(driver, monkeypatch):
+    client = _FakeWda(device_name="Someone Else's iPhone")
+    _connect_stubs(driver, monkeypatch, client)
+    with pytest.raises(RuntimeError, match="ARTEMIS_IOS_WDA_URL"):
+        await driver.connect()
+    assert client.opened_sessions == 0
+    assert driver._session_key is None
+
+
+@pytest.mark.asyncio
+async def test_connect_rejects_a_simulator_wda(driver, monkeypatch):
+    client = _FakeWda(device_name="Jane's iPhone", is_simulator=True)
+    _connect_stubs(driver, monkeypatch, client)
+    with pytest.raises(RuntimeError, match="ARTEMIS_IOS_WDA_URL"):
+        await driver.connect()
+    assert client.opened_sessions == 0
+
+
+# --- Disconnect cleanup ----------------------------------------------------- #
+
+
+class _HungProcess:
+    """A subprocess stand-in that ignores terminate() and must be reaped."""
+
+    def __init__(self):
+        self.returncode = None
+        self.terminated = False
+        self.killed = False
+        self.communicated = False
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self):
+        await asyncio.Event().wait()  # never exits on its own
+
+    async def communicate(self):
+        self.communicated = True
+        return b"", b""
+
+
+@pytest.mark.asyncio
+async def test_disconnect_reaps_a_test_process_that_ignores_terminate(
+    connected_driver, monkeypatch
+):
+    process = _HungProcess()
+    connected_driver._wda_test_process = process
+    monkeypatch.setattr(physical_driver.asyncio, "wait_for", _hangs_then_times_out)
+    await connected_driver.disconnect()
+    assert process.terminated
+    assert process.killed and process.communicated
+    assert connected_driver._wda_test_process is None
+
+
+async def _hangs_then_times_out(awaitable, timeout):
+    awaitable.close()
+    raise TimeoutError
+
+
+@pytest.mark.asyncio
+async def test_disconnect_reaps_children_even_when_close_session_fails(
+    connected_driver, monkeypatch
+):
+    async def _boom():
+        raise RuntimeError("wda already gone")
+
+    connected_driver._wda.close_session = _boom
+    process = _HungProcess()
+    connected_driver._wda_test_process = process
+    connected_driver._wda_runner_pid = 777
+    calls = []
+
+    async def fake_xcrun(*arguments, timeout=30.0):
+        calls.append(arguments)
+        return b""
+
+    monkeypatch.setattr(physical_driver, "run_xcrun", fake_xcrun)
+    monkeypatch.setattr(physical_driver.asyncio, "wait_for", _hangs_then_times_out)
+    await connected_driver.disconnect()
+    assert process.killed and process.communicated
+    assert any("terminate" in args and str(777) in args for args in calls)
+    assert connected_driver._wda is None
+
+
+# --- Physical recorder cancellation and ffconcat ---------------------------- #
+
+
+def test_ffconcat_file_line_escapes_apostrophes():
+    path = Path("/tmp/Jane's Frames/frame 1.png")
+    line = PhysicalIosRecorder._ffconcat_file_line(path)
+    assert line == "file '/tmp/Jane'\\''s Frames/frame 1.png'"
+
+
+@pytest.mark.asyncio
+async def test_run_ffmpeg_cancellation_reaps_and_drops_part_file(tmp_path, monkeypatch):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    reaped: list[object] = []
+
+    class _FakeProc:
+        returncode = None
+
+        async def communicate(self):
+            entered.set()
+            await release.wait()
+            return b"", b""
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc()
+
+    async def fake_reap(process):
+        reaped.append(process)
+
+    monkeypatch.setattr(physical_recording.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(physical_recording, "reap_process", fake_reap)
+    part = tmp_path / "segment_0000.part.mp4"
+    part.write_bytes(b"partial")
+    task = asyncio.create_task(physical_recording._run_ffmpeg(["-i", "in", str(part)]))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(reaped) == 1
+    assert not part.exists()
+
+
+@pytest.mark.asyncio
+async def test_run_ffmpeg_timeout_reaps_and_reports_failure(tmp_path, monkeypatch):
+    reaped: list[object] = []
+
+    class _FakeProc:
+        returncode = None
+
+        async def communicate(self):
+            await asyncio.Event().wait()
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc()
+
+    async def fake_reap(process):
+        process.returncode = -9
+        reaped.append(process)
+
+    monkeypatch.setattr(physical_recording.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(physical_recording, "reap_process", fake_reap)
+    monkeypatch.setattr(physical_recording, "FFMPEG_TIMEOUT_SECONDS", 0.05)
+    code, stderr = await physical_recording._run_ffmpeg(["-i", "in", str(tmp_path / "o.mp4")])
+    assert code == -1
+    assert b"timed out" in stderr
+    assert len(reaped) == 1
+
+
+@pytest.mark.asyncio
+async def test_input_fails_clearly_when_wda_is_detached():
+    """A stale session key without a WDA client fails before input/observe."""
+    driver = PhysicalIosDriver(device_id=IPHONE_UDID)
+    driver._session_key = "stale-session"
+    driver._wda = None
+    for call in (
+        driver.tap(10, 10),
+        driver.press_key("home"),
+        driver.input_text("hi", clear_existing=False),
+    ):
+        with pytest.raises(RuntimeError, match="Connect the physical iOS driver"):
+            await call
+
+
+class _FalseHomeWda(_FakeWda):
+    """A WDA backend that always reports Home button failure."""
+
+    async def press_button(self, name):
+        self.buttons.append(name)
+        return False
+
+
+@pytest.mark.asyncio
+async def test_home_key_falls_back_to_homescreen_when_button_fails(connected_driver):
+    connected_driver._wda = _FalseHomeWda()
+    assert await connected_driver.press_key("home") is True
+    assert connected_driver._wda.buttons == ["home"]
+    assert connected_driver._wda.homescreen_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_app_switch_raises_when_home_button_is_unavailable(connected_driver):
+    connected_driver._wda = _FalseHomeWda()
+    with pytest.raises(NotImplementedError, match="App switching is unavailable"):
+        await connected_driver.press_key("app_switch")
+    # No homescreen fallback may masquerade as a successful app switch.
+    assert connected_driver._wda.homescreen_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_app_switch_double_presses_home_on_capable_backend(connected_driver):
+    assert await connected_driver.press_key("app_switch") is True
+    assert connected_driver._wda.buttons == ["home", "home"]
+
+
+@pytest.mark.parametrize("bad_rect", ["missing", None, "bogus", 42])
+def test_parse_wda_elements_skips_bad_parent_rect_but_keeps_children(bad_rect):
+    child = {
+        "type": "XCUIElementTypeButton",
+        "label": "OK",
+        "rect": {"x": 1, "y": 1, "width": 10, "height": 10},
+    }
+    tree = {"type": "XCUIElementTypeApplication", "children": [child]}
+    if bad_rect != "missing":
+        tree["rect"] = bad_rect
+    elements = wda.parse_wda_elements(tree, (1.0, 1.0), 300, 600)
+    assert [e["text"] for e in elements] == ["OK"]

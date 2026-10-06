@@ -570,7 +570,9 @@ _SPECS: tuple[ActionSpec, ...] = (
             params=(
                 ParamSpec(
                     "key",
-                    Literal["ENTER", "BACK", "HOME", "APP_SWITCH", "POWER", "VOLUME_UP", "VOLUME_DOWN"],
+                    Literal[
+                        "ENTER", "BACK", "HOME", "APP_SWITCH", "POWER", "VOLUME_UP", "VOLUME_DOWN"
+                    ],
                     "Standard system button name (ENTER, BACK, HOME, APP_SWITCH, POWER, VOLUME_UP, VOLUME_DOWN).",
                 ),
             ),

@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Annotated
 
 from artemis.config import initialize_llm_config
-from artemis.drivers.ios.discovery import BOOTED_SIMULATOR_ID
 from artemis.runtime.adb_endpoint import normalize_device_platform
 from artemis.sdk import Agent
 from artemis.sdk.builders import Builders
@@ -68,8 +67,8 @@ async def run_batch_tasks(
     if explorer_pro_mode is not None:
         config_builder.with_explorer(pro_mode=explorer_pro_mode)
     if normalize_device_platform(platform, strict=False) == "ios":
-        config_builder.for_ios_simulator(
-            device_id=device_serial or BOOTED_SIMULATOR_ID,
+        config_builder.for_ios_device(
+            device_id=device_serial or "booted",
             workspace_path=ios_workspace,
         )
     elif device_serial:
