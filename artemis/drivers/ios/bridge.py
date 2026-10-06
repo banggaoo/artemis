@@ -25,8 +25,12 @@ from typing import Any
 
 import anyio
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp.client.stdio import get_default_environment, stdio_client
 from mcp.shared.exceptions import McpError
+
+from third_party.mobile_use.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 _APPROVAL_MESSAGES = (
@@ -102,6 +106,7 @@ class XcodeBridge:
         self._ready: asyncio.Future[set[str]] | None = None
         self._requests: asyncio.Queue[Any] = asyncio.Queue()
         self._active: asyncio.Future[Any] | None = None
+        self._start_lock = asyncio.Lock()
         self.tools: set[str] = set()
 
     @property
@@ -109,22 +114,29 @@ class XcodeBridge:
         return self._owner is not None and not self._owner.done()
 
     async def start(self) -> None:
-        if self._owner is not None and not self._owner.done():
-            return
-        self._ready = asyncio.get_running_loop().create_future()
-        self._owner = asyncio.create_task(self._run(), name="artemis-xcode-bridge")
-        try:
-            self.tools = await asyncio.wait_for(asyncio.shield(self._ready), self.timeout_seconds)
-        except (*_ERRORS, TimeoutError, asyncio.CancelledError):
-            await self.close()
-            raise
+        async with self._start_lock:
+            if self._owner is not None and not self._owner.done():
+                return
+            self._ready = asyncio.get_running_loop().create_future()
+            self._owner = asyncio.create_task(self._run(), name="artemis-xcode-bridge")
+            try:
+                self.tools = await asyncio.wait_for(
+                    asyncio.shield(self._ready), self.timeout_seconds
+                )
+            except (*_ERRORS, TimeoutError, asyncio.CancelledError):
+                await self.close()
+                raise
 
     async def _run(self) -> None:
         try:
-            # Preserve DEVELOPER_DIR/MCP_XCODE_PID and the user's approved configuration.
-            params = StdioServerParameters(
-                command="xcrun", args=["mcpbridge"], env=dict(os.environ)
-            )
+            # mcpbridge only needs a clean base env plus the Xcode pinning
+            # vars — do not forward the full environment (API keys) to a
+            # long-lived child process.
+            env = get_default_environment()
+            for key in ("DEVELOPER_DIR", "MCP_XCODE_PID"):
+                if value := os.environ.get(key):
+                    env[key] = value
+            params = StdioServerParameters(command="xcrun", args=["mcpbridge"], env=env)
             async with stdio_client(params) as (reader, writer):
                 async with ClientSession(reader, writer) as session:
                     await session.initialize()
@@ -207,6 +219,10 @@ class XcodeBridge:
             await owner
         except asyncio.CancelledError:
             pass
+        except Exception as exc:
+            # Owner failures already propagate to requesters via futures; a
+            # close() must never mask the error its caller is handling.
+            logger.debug("Xcode bridge owner exited with an error: %s", exc)
         if self._ready is not None and self._ready.done() and not self._ready.cancelled():
             self._ready.exception()  # consume an initialization error on cancellation
         self.tools.clear()

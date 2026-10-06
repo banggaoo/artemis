@@ -29,6 +29,7 @@ from artemis.drivers.ios.bridge import XcodeApprovalRequiredError, XcodeBridge
 from artemis.drivers.ios.discovery import (
     clear_ios_simulator_cache,
     parse_simctl_devices,
+    plist_to_json,
     run_xcrun,
 )
 from artemis.drivers.ios.hierarchy import application_bundle, parse_hierarchy
@@ -38,6 +39,20 @@ from third_party.mobile_use.utils.logger import get_logger
 from third_party.mobile_use.utils.video import get_active_session, remove_active_session
 
 logger = get_logger(__name__)
+
+
+async def _parse_listapps_output(raw: bytes) -> dict[str, Any]:
+    """Parse ``simctl listapps`` output into a bundle-id keyed dict.
+
+    simctl emits OpenStep (ASCII) plists on older Xcode, XML/binary on newer
+    ones; ``plistlib`` only reads the latter, so OpenStep payloads are routed
+    through ``plutil -convert json``.
+    """
+    try:
+        return plistlib.loads(raw)
+    except (plistlib.InvalidFileException, ValueError):
+        pass
+    return json.loads(await plist_to_json(raw))
 
 
 class XcodeSimulatorDriver(BaseDeviceDriver):
@@ -125,7 +140,11 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
     async def connect(self) -> None:
         async with self._connect_lock:
             if self._session_key:
-                return
+                if self._bridge.connected:
+                    return
+                # The bridge retires itself on tool-call failures; release the
+                # orphaned native session before starting over.
+                await self.disconnect()
             candidate = await self._resolve_device()
             if candidate.get("state") == "Shutdown":
                 await run_xcrun("simctl", "boot", self._device_id)
@@ -176,7 +195,7 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
                     raise RuntimeError("Xcode did not return a device interaction session key.")
                 if (
                     not session.get("deviceIsSimulator")
-                    or session.get("deviceUUID", "").lower() != self._device_id.lower()
+                    or str(session.get("deviceUUID") or "").lower() != self._device_id.lower()
                 ):
                     raise RuntimeError("Xcode selected a different device; refusing to interact.")
                 await self.get_screen_data(skip_settling=True)
@@ -191,7 +210,7 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
                     error.workspace_path = self._workspace_path
                 try:
                     await self.disconnect()
-                except (OSError, ValueError, RuntimeError, TimeoutError) as cleanup_error:
+                except (Exception, asyncio.CancelledError) as cleanup_error:
                     logger.warning(
                         f"Could not release the Xcode session after a connection failure: {cleanup_error}",
                     )
@@ -421,7 +440,9 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
     async def list_apps(self) -> dict[str, str]:
         async with self._operation_lock:
             self._require_connected()
-            data = plistlib.loads(await run_xcrun("simctl", "listapps", self._device_id))
+            data = await _parse_listapps_output(
+                await run_xcrun("simctl", "listapps", self._device_id)
+            )
         return {
             bundle: info.get("CFBundleDisplayName") or info.get("CFBundleName") or bundle
             for bundle, info in data.items()

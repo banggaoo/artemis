@@ -71,7 +71,7 @@ def base_verdict(results: Sequence[ProbeResult]) -> Verdict:
     blockers = [r for r in results if r.is_blocker]
     if not blockers or any(r.status is not ProbeStatus.PASS for r in blockers):
         return "blocked"
-    if any(r.status is not ProbeStatus.PASS for r in results):
+    if any(r.status not in (ProbeStatus.PASS, ProbeStatus.SKIPPED) for r in results):
         return "degraded"
     return "ready"
 

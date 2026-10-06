@@ -1240,6 +1240,11 @@ async def mobile_diagnose(
     """
     fixes_applied: list[dict[str, Any]] = []
     platform_name = (platform or "android").strip().lower()
+    if platform_name not in ("android", "ios"):
+        return {
+            "verdict": "blocked",
+            "error": f"Invalid platform '{platform}'. Expected 'android' or 'ios'.",
+        }
     requested_device = device_serial.strip() if device_serial and device_serial.strip() else None
     avd_name = (
         launch_avd.strip() if launch_avd and launch_avd.strip() and platform_name != "ios" else None
