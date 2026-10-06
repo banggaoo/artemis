@@ -27,7 +27,7 @@ from artemis.core.diagnostics.probes.credentials_probe import (
     LLMCredentialsProbe,
     VisionOCRProbe,
 )
-from artemis.core.diagnostics.probes.ios_probe import IosSimulatorProbe
+from artemis.core.diagnostics.probes.ios_probe import IosDeviceProbe
 from artemis.core.diagnostics.probes.runtime_probe import (
     PythonRuntimeProbe,
     SystemConfigProbe,
@@ -68,7 +68,7 @@ class ReadinessEngine:
         self._credentials_probe = LLMCredentialsProbe()
         self._ocr_probe = VisionOCRProbe()
         self._adb_probe = AdbDeviceProbe()
-        self._ios_probe = IosSimulatorProbe()
+        self._ios_probe = IosDeviceProbe()
         self._report_cache: SystemReadinessReport | None = None
         self._report_cache_time = 0.0
         self._report_cache_generation = -1

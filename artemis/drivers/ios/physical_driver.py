@@ -42,14 +42,14 @@ from PIL import Image
 
 from artemis.drivers.base import KeyCode, ScreenData, SwipeDirection
 from artemis.drivers.ios.discovery import (
+    BOOTED_SIMULATOR_ID,
+    device_matches_identifier,
+    devicectl_screenshot,
     is_physical_ios,
     list_core_devices,
     run_xcrun,
 )
-from artemis.drivers.ios.physical_recording import (
-    IosPhysicalRecordingSession,
-    PhysicalIosRecorder,
-)
+from artemis.drivers.ios.physical_recording import PhysicalIosRecorder
 from artemis.drivers.ios.wda import (
     WdaClient,
     WdaUnavailableError,
@@ -64,7 +64,7 @@ from third_party.mobile_use.utils.video import get_active_session, remove_active
 
 logger = get_logger(__name__)
 
-DEVICECTL_QUERY_TIMEOUT = 30.0
+DEVICECTL_OP_TIMEOUT = 30.0
 DEVICECTL_LAUNCH_TIMEOUT = 60.0
 DEVICECTL_INSTALL_TIMEOUT = 300.0
 WDA_START_TIMEOUT = 45.0
@@ -103,7 +103,6 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         super().__init__(
             device_id=device_id, width=width, height=height, workspace_path=workspace_path
         )
-        self._physical_recorder: PhysicalIosRecorder | None = None
         self._launched_pids: dict[str, int] = {}
         self._wda: WdaClient | None = None
         self._wda_runner_pid: int | None = None
@@ -113,7 +112,7 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
 
     async def _resolve_device(self) -> dict[str, Any]:
         self._validate_workspace()
-        if self._device_id in ("", "booted"):
+        if self._device_id in ("", BOOTED_SIMULATOR_ID):
             raise ValueError(
                 "Physical iOS devices require --device-serial <device UDID>; "
                 "'booted' only selects simulators. Find UDIDs via 'xcrun devicectl list devices'."
@@ -124,17 +123,14 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
             raise RuntimeError(
                 "Could not enumerate physical devices; 'xcrun devicectl list devices' failed."
             )
-        needle = self._device_id.lower()
         matches = [
             device
             for device in devices
             if is_physical_ios(device)
-            and (
-                device.get("udid", "").lower() == needle
-                or device.get("name") == self._device_id
-            )
+            and device_matches_identifier(device, self._device_id)
         ]
         if not matches:
+            needle = self._device_id.lower()
             simulator = [
                 device
                 for device in devices
@@ -193,13 +189,13 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
 
     async def disconnect(self) -> None:
         try:
-            if self._physical_recorder is not None:
-                session = self._physical_recorder.session
+            if self._recorder is not None:
+                session = self._recorder.session
                 if session is not None:
                     # A failed (non-active) session still owns frames and
                     # conversions — finalize it too so nothing is lost.
                     try:
-                        await self._physical_recorder.stop()
+                        await self._recorder.stop()
                     except Exception as exc:
                         logger.error(
                             f"Physical iOS recording finalization failed during disconnect: {exc}"
@@ -230,7 +226,7 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                     logger.debug(f"WDA runner termination failed: {exc}")
 
     def _require_connected(self) -> None:
-        if not self._session_key or self._device_id in ("", "booted"):
+        if not self._session_key or self._device_id in ("", BOOTED_SIMULATOR_ID):
             raise RuntimeError("Connect the physical iOS driver before interacting.")
 
     async def _ensure_wda(self) -> WdaClient:
@@ -380,7 +376,7 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                 self._device_id,
                 "--json-output",
                 str(target),
-                timeout=DEVICECTL_QUERY_TIMEOUT,
+                timeout=DEVICECTL_OP_TIMEOUT,
             )
             payload = json.loads(target.read_text(encoding="utf-8"))
         result = payload.get("result")
@@ -397,16 +393,8 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                 logger.debug(f"WDA screenshot failed, falling back to devicectl: {exc}")
         with tempfile.TemporaryDirectory(prefix="artemis-shot-") as tmp:
             target = Path(tmp) / "shot.png"
-            await run_xcrun(
-                "devicectl",
-                "device",
-                "capture",
-                "screenshot",
-                "--device",
-                self._device_id,
-                "--destination",
-                str(target),
-                timeout=DEVICECTL_QUERY_TIMEOUT,
+            await devicectl_screenshot(
+                self._device_id, target, timeout=DEVICECTL_OP_TIMEOUT
             )
             data = target.read_bytes()
         if not data:
@@ -453,18 +441,6 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
             platform="ios",
         )
 
-    async def get_screen_data(self, skip_settling: bool = False) -> ScreenData:
-        async with self._operation_lock:
-            return await self._capture()
-
-    def _wda_point(self, x: int, y: int) -> tuple[float, float]:
-        """Convert screenshot pixels to the WDA point coordinate space."""
-        if self._scale is None:
-            raise RuntimeError("Capture an iOS screen before coordinate interaction.")
-        if not 0 <= x < self._width or not 0 <= y < self._height:
-            raise ValueError("iOS input coordinates are outside the current screenshot.")
-        return x / self._scale[0], y / self._scale[1]
-
     # --- Input ---
 
     async def tap(
@@ -473,21 +449,13 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         if times < 1 or duration_ms < 0 or delay_ms < 0:
             raise ValueError("Tap count must be positive and durations nonnegative.")
         async with self._operation_lock:
-            previous_size = self.screen_size
-            await self._capture()
-            if self.screen_size != previous_size:
-                raise ValueError(
-                    "The iOS screen changed orientation or size. Observe it again before tapping."
-                )
-            point = self._wda_point(x, y)
+            await self._capture_unchanged("tapping")
+            point = self._scaled_point(x, y)
             for index in range(times):
                 await self._wda.tap(*point, hold_ms=duration_ms)
                 if index < times - 1:
                     await asyncio.sleep(delay_ms / 1000)
             return True
-
-    async def long_press(self, x: int, y: int, duration_ms: int = 1000) -> bool:
-        return await self.tap(x, y, duration_ms=duration_ms)
 
     async def swipe(
         self, start_x: int, start_y: int, end_x: int, end_y: int, duration_ms: int = 800
@@ -495,14 +463,9 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         if duration_ms <= 0:
             raise ValueError("Swipe duration must be positive.")
         async with self._operation_lock:
-            previous_size = self.screen_size
-            await self._capture()
-            if self.screen_size != previous_size:
-                raise ValueError(
-                    "The iOS screen changed orientation or size. Observe it again before swiping."
-                )
-            start = self._wda_point(start_x, start_y)
-            end = self._wda_point(end_x, end_y)
+            await self._capture_unchanged("swiping")
+            start = self._scaled_point(start_x, start_y)
+            end = self._scaled_point(end_x, end_y)
             await self._wda.swipe(*start, *end, duration_ms)
             return True
 
@@ -515,16 +478,12 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         if duration_ms <= 0:
             raise ValueError("Swipe duration must be positive.")
         async with self._operation_lock:
+            # Rotation-tolerant like the simulator path: recapture and compute
+            # from the *current* size rather than refusing like tap.
             await self._capture()
-            w, h = self.screen_size
-            points = {
-                "up": (w // 2, h * 3 // 4, w // 2, h // 4),
-                "down": (w // 2, h // 4, w // 2, h * 3 // 4),
-                "left": (w * 3 // 4, h // 2, w // 4, h // 2),
-                "right": (w // 4, h // 2, w * 3 // 4, h // 2),
-            }
-            start = self._wda_point(points[direction][0], points[direction][1])
-            end = self._wda_point(points[direction][2], points[direction][3])
+            sx, sy, ex, ey = self._direction_points(direction, *self.screen_size)
+            start = self._scaled_point(sx, sy)
+            end = self._scaled_point(ex, ey)
             await self._wda.swipe(*start, *end, duration_ms)
             return True
 
@@ -572,19 +531,11 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
             element, center, error = await self.find_element(query, data)
             if error or element is None or center is None:
                 return False
-            point = self._wda_point(*center)
+            point = self._scaled_point(*center)
             await self._wda.tap(
                 *point, hold_ms=duration_ms if long_press else 0
             )
             return True
-
-    async def find_element(
-        self, query: ElementQuery, screen_data: ScreenData | None = None
-    ) -> tuple[dict[str, Any] | None, list[int] | None, str | None]:
-        element, center, error = await super().find_element(query, screen_data)
-        if element is not None:
-            center = element.get("hit_point", center)
-        return element, center, error
 
     # --- App lifecycle via devicectl ---
 
@@ -675,7 +626,7 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         ]
         if kill:
             arguments.append("--kill")
-        await run_xcrun(*arguments, timeout=DEVICECTL_QUERY_TIMEOUT)
+        await run_xcrun(*arguments, timeout=DEVICECTL_OP_TIMEOUT)
 
     async def stop_app(self, package_name: str) -> bool:
         async with self._operation_lock:
@@ -763,7 +714,7 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                 "--device",
                 self._device_id,
                 url,
-                timeout=DEVICECTL_QUERY_TIMEOUT,
+                timeout=DEVICECTL_OP_TIMEOUT,
             )
         return True
 
@@ -779,26 +730,6 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
 
     # --- Recording (devicectl screenshot polling) ---
 
-    @property
-    def recording_session(self) -> IosPhysicalRecordingSession | None:
-        if self._physical_recorder is None:
-            return None
-        return self._physical_recorder.session
-
-    async def start_video_recording(
-        self, output_dir: Path | None = None, max_duration_seconds: int = 900
-    ) -> None:
-        self._require_connected()
-        if self._physical_recorder is None:
-            self._physical_recorder = PhysicalIosRecorder(self._device_id)
-        await self._physical_recorder.start(output_dir, max_duration_seconds)
-
-    async def seal_recording_segment(self, through_time: float | None = None) -> None:
-        if self._physical_recorder is not None:
-            await self._physical_recorder.seal(through_time)
-
-    async def stop_video_recording(self) -> str | None:
-        if self._physical_recorder is None:
-            return None
-        path = await self._physical_recorder.stop()
-        return str(path) if path is not None else None
+    def _new_recorder(self) -> PhysicalIosRecorder:
+        """Physical recorder: devicectl screenshot polling + ffconcat encode."""
+        return PhysicalIosRecorder(self._device_id)

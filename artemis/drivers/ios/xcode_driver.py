@@ -11,15 +11,16 @@
 
 """iOS Simulator support using Xcode 27's native MCP and simctl tools."""
 
+from __future__ import annotations
+
 import asyncio
 import base64
 from io import BytesIO
 import json
 from pathlib import Path
 import plistlib
-import re
 import sys
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from PIL import Image
@@ -28,15 +29,24 @@ from artemis.drivers.base import BaseDeviceDriver, KeyCode, ScreenData, SwipeDir
 from artemis.drivers.ios.bridge import XcodeApprovalRequiredError, XcodeBridge
 from artemis.drivers.ios.discovery import (
     clear_ios_simulator_cache,
+    BOOTED_SIMULATOR_ID,
     parse_simctl_devices,
+    parse_xcode_version,
     plist_to_json,
     run_xcrun,
 )
 from artemis.drivers.ios.hierarchy import application_bundle, parse_hierarchy
-from artemis.drivers.ios.recording import IosRecordingSession, IosScreenRecorder
+from artemis.drivers.ios.recording import (
+    DEFAULT_MAX_DURATION_SECONDS,
+    IosRecordingSession,
+    IosScreenRecorder,
+)
 from third_party.mobile_use.controllers.types import ElementQuery
 from third_party.mobile_use.utils.logger import get_logger
 from third_party.mobile_use.utils.video import get_active_session, remove_active_session
+
+if TYPE_CHECKING:
+    from artemis.drivers.ios.physical_recording import PhysicalIosRecorder
 
 logger = get_logger(__name__)
 
@@ -65,7 +75,7 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
 
     def __init__(
         self,
-        device_id: str = "booted",
+        device_id: str = BOOTED_SIMULATOR_ID,
         width: int = 0,
         height: int = 0,
         *,
@@ -81,7 +91,7 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
         self._bridge = XcodeBridge()
         self._connect_lock = asyncio.Lock()
         self._operation_lock = asyncio.Lock()
-        self._recorder: IosScreenRecorder | None = None
+        self._recorder: IosScreenRecorder | PhysicalIosRecorder | None = None
 
     @property
     def device_id(self) -> str:
@@ -101,9 +111,8 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
         """Validate the macOS/Xcode host requirements shared by all iOS drivers."""
         if sys.platform != "darwin":
             raise RuntimeError("iOS support requires macOS and Xcode 27 or later.")
-        version = (await run_xcrun("xcodebuild", "-version")).decode()
-        match = re.search(r"Xcode\s+(\d+)", version)
-        if not match or int(match.group(1)) < 27:
+        version = parse_xcode_version(await run_xcrun("xcodebuild", "-version"))
+        if version is None or int(version.split(".")[0]) < 27:
             raise RuntimeError(
                 "Native iOS interaction requires Xcode 27 or later. Set DEVELOPER_DIR to select it."
             )
@@ -122,7 +131,7 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
         await self._require_ios_host()
         devices = json.loads(await run_xcrun("simctl", "list", "devices", "--json"))
         available = parse_simctl_devices(devices)
-        if self._device_id == "booted":
+        if self._device_id == BOOTED_SIMULATOR_ID:
             candidates = [device for device in available if device.get("state") == "Booted"]
             if len(candidates) != 1:
                 raise ValueError(
@@ -265,7 +274,7 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
         return await self._bridge.call("DeviceInteractionSynthesize", arguments)
 
     def _require_connected(self) -> None:
-        if not self._session_key or self._device_id == "booted":
+        if not self._session_key or self._device_id == BOOTED_SIMULATOR_ID:
             raise RuntimeError("Connect the iOS simulator driver before interacting.")
 
     async def _capture(self) -> ScreenData:
@@ -299,12 +308,37 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
         async with self._operation_lock:
             return await self._capture()
 
-    def _point(self, x: int, y: int) -> str:
+    async def _capture_unchanged(self, action: str) -> ScreenData:
+        """Capture, refusing to continue when the screen geometry changed."""
+        previous_size = self.screen_size
+        data = await self._capture()
+        if self.screen_size != previous_size:
+            raise ValueError(
+                f"The iOS screen changed orientation or size. Observe it again before {action}."
+            )
+        return data
+
+    def _scaled_point(self, x: int, y: int) -> tuple[float, float]:
+        """Convert screenshot pixels to the driver's logical point space."""
         if self._scale is None:
             raise RuntimeError("Capture an iOS screen before coordinate interaction.")
         if not 0 <= x < self._width or not 0 <= y < self._height:
             raise ValueError("iOS input coordinates are outside the current screenshot.")
-        return f"{x / self._scale[0]:.4f} {y / self._scale[1]:.4f}"
+        return x / self._scale[0], y / self._scale[1]
+
+    def _point(self, x: int, y: int) -> str:
+        px, py = self._scaled_point(x, y)
+        return f"{px:.4f} {py:.4f}"
+
+    @staticmethod
+    def _direction_points(direction: str, w: int, h: int) -> tuple[int, int, int, int]:
+        points = {
+            "up": (w // 2, h * 3 // 4, w // 2, h // 4),
+            "down": (w // 2, h // 4, w // 2, h * 3 // 4),
+            "left": (w * 3 // 4, h // 2, w // 4, h // 2),
+            "right": (w // 4, h // 2, w * 3 // 4, h // 2),
+        }
+        return points[direction]
 
     @staticmethod
     def _activation_for(data: ScreenData, x: int, y: int) -> str | None:
@@ -334,12 +368,7 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
         if times < 1 or duration_ms < 0 or delay_ms < 0:
             raise ValueError("Tap count must be positive and durations nonnegative.")
         async with self._operation_lock:
-            previous_size = self.screen_size
-            data = await self._capture()
-            if self.screen_size != previous_size:
-                raise ValueError(
-                    "The iOS screen changed orientation or size. Observe it again before tapping."
-                )
+            data = await self._capture_unchanged("tapping")
             command = f"t {self._point(x, y)} {duration_ms / 1000:.3f}"
             for index in range(times):
                 await self._synthesize(command, activation=self._activation_for(data, x, y))
@@ -356,12 +385,7 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
         if duration_ms <= 0:
             raise ValueError("Swipe duration must be positive.")
         async with self._operation_lock:
-            previous_size = self.screen_size
-            data = await self._capture()
-            if self.screen_size != previous_size:
-                raise ValueError(
-                    "The iOS screen changed orientation or size. Observe it again before swiping."
-                )
+            data = await self._capture_unchanged("swiping")
             await self._synthesize(
                 f"t {self._point(start_x, start_y)} f {self._point(end_x, end_y)} {duration_ms / 1000:.3f}",
                 activation=self._activation_for(data, start_x, start_y),
@@ -377,15 +401,10 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
         if duration_ms <= 0:
             raise ValueError("Swipe duration must be positive.")
         async with self._operation_lock:
+            # swipe_direction is rotation-tolerant by design: recapture and
+            # compute from the *current* size rather than refusing like tap.
             data = await self._capture()
-            w, h = self.screen_size
-            points = {
-                "up": (w // 2, h * 3 // 4, w // 2, h // 4),
-                "down": (w // 2, h // 4, w // 2, h * 3 // 4),
-                "left": (w * 3 // 4, h // 2, w // 4, h // 2),
-                "right": (w // 4, h // 2, w * 3 // 4, h // 2),
-            }
-            sx, sy, ex, ey = points[direction]
+            sx, sy, ex, ey = self._direction_points(direction, *self.screen_size)
             await self._synthesize(
                 f"t {self._point(sx, sy)} f {self._point(ex, ey)} {duration_ms / 1000:.3f}",
                 activation=self._activation_for(data, sx, sy),
@@ -497,7 +516,11 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
     async def execute_shell(self, command: str, timeout_seconds: float = 15.0) -> str:
         raise NotImplementedError("Android shell commands are unavailable on iOS Simulator.")
 
-    # --- Recording (native simctl segmented capture) ---
+    # --- Recording (native segmented capture) ---
+
+    def _new_recorder(self) -> IosScreenRecorder | PhysicalIosRecorder:
+        """Recorder implementation for this driver (sim: simctl recordVideo)."""
+        return IosScreenRecorder(self._device_id)
 
     @property
     def recording_session(self) -> IosRecordingSession | None:
@@ -507,13 +530,15 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
         return self._recorder.session
 
     async def start_video_recording(
-        self, output_dir: Path | None = None, max_duration_seconds: int = 900
+        self,
+        output_dir: Path | None = None,
+        max_duration_seconds: int = DEFAULT_MAX_DURATION_SECONDS,
     ) -> None:
         self._require_connected()
         if not self._device_id:
-            raise RuntimeError("iOS recording requires a pinned simulator UDID")
+            raise RuntimeError("iOS recording requires a pinned device UDID")
         if self._recorder is None:
-            self._recorder = IosScreenRecorder(self._device_id)
+            self._recorder = self._new_recorder()
         await self._recorder.start(output_dir, max_duration_seconds)
 
     async def seal_recording_segment(self, through_time: float | None = None) -> None:

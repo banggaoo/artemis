@@ -44,6 +44,8 @@ from artemis.clients.screen_client_factory import create_screen_client
 from artemis.context import ArtemisContext, DeviceContext, DevicePlatform
 from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.platform import platform
+from artemis.drivers.ios.discovery import BOOTED_SIMULATOR_ID
+from artemis.runtime.adb_endpoint import normalize_device_platform
 from third_party.mobile_use.utils.app_launch_utils import launch_app_with_retries
 
 
@@ -129,7 +131,7 @@ def _get_controller(device_serial: str | None = None, target_platform: str | Non
     target_serial = (
         device_serial or os.environ.get("ARTEMIS_DEVICE_ID") or os.environ.get("ADB_DEVICE_SERIAL")
     )
-    if (target_platform or "").lower() == "ios":
+    if normalize_device_platform(target_platform, strict=False) == "ios":
         cache_key = f"ios:{target_serial or 'booted'}"
         if cache_key in _CONTROLLERS:
             return _CONTROLLERS[cache_key]
@@ -139,7 +141,7 @@ def _get_controller(device_serial: str | None = None, target_platform: str | Non
             device=DeviceContext(
                 host_platform=platform.os_type.name,
                 mobile_platform=DevicePlatform.IOS,
-                device_id=target_serial or "booted",
+                device_id=target_serial or BOOTED_SIMULATOR_ID,
                 device_width=1206,
                 device_height=2622,
             ),

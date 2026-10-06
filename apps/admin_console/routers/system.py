@@ -28,6 +28,7 @@ from artemis.core.diagnostics.adb_server_connection import (
     adb_server_connection,
 )
 from artemis.core.diagnostics.schema import SystemReadinessReport
+from artemis.runtime.adb_endpoint import normalize_device_platform
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -115,7 +116,13 @@ async def select_active_device(request: SelectDeviceRequest):
     if not serial:
         raise HTTPException(status_code=400, detail="Device serial cannot be empty.")
 
-    platform = (request.platform or "android").strip().lower()
+    try:
+        platform = normalize_device_platform(request.platform)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported platform '{request.platform}'. Expected 'android' or 'ios'.",
+        )
     if platform == "ios":
         # iOS has no ADB probe to retarget; validate the UDID and let the
         # task payload's device_serial + platform carry the binding.
@@ -125,11 +132,6 @@ async def select_active_device(request: SelectDeviceRequest):
         if rejection:
             raise HTTPException(status_code=400, detail=rejection)
         return {"status": "success", "selected_serial": serial, "platform": "ios"}
-    if platform != "android":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported platform '{request.platform}'. Expected 'android' or 'ios'.",
-        )
 
     readiness_engine.set_probe_target_serial(serial)
     # Return updated readiness

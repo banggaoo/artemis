@@ -44,6 +44,7 @@ from artemis.core.diagnostics.readiness import (
 )
 from artemis.core.diagnostics.schema import ProbeResult, ProbeStatus, SystemReadinessReport
 from artemis.runtime import DeviceExecutionLock, trace_store
+from artemis.runtime.adb_endpoint import normalize_device_platform
 from artemis.runtime.helper_manager import helper_manager
 from artemis.utils.credentials_validator import validate_api_key
 from third_party.mobile_use.utils.logger import get_logger
@@ -1251,8 +1252,9 @@ async def mobile_diagnose(
           hardware); ADB-only extras (AVD launch, accessibility helper) are skipped.
     """
     fixes_applied: list[dict[str, Any]] = []
-    platform_name = (platform or "android").strip().lower()
-    if platform_name not in ("android", "ios"):
+    try:
+        platform_name = normalize_device_platform(platform)
+    except ValueError:
         return {
             "verdict": "blocked",
             "error": f"Invalid platform '{platform}'. Expected 'android' or 'ios'.",

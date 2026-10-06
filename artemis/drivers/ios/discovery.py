@@ -22,6 +22,8 @@ stays in one place; paired physical hardware is enumerated through
 
 import asyncio
 import json
+from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -34,34 +36,58 @@ logger = get_logger(__name__)
 
 SIMCTL_QUERY_TIMEOUT = 15.0
 
-# ``simctl list devices`` takes seconds on a busy host and every iOS consumer
-# (readiness probe, device pool validation, /api/devices) enumerates it. Share
-# one result briefly so polling UIs do not spawn back-to-back simctl calls.
-_SIMULATOR_CACHE_TTL = 10.0
-_simulator_cache: list[dict[str, Any]] | None = None
-_simulator_cache_time = 0.0
+# ``simctl`` wildcard that resolves to whichever simulator is currently
+# booted; also the public sentinel callers pass to mean "the booted one".
+BOOTED_SIMULATOR_ID = "booted"
+
+# ``simctl list devices`` / ``devicectl list devices`` take seconds on a busy
+# host and every iOS consumer (readiness probe, device pool validation,
+# /api/devices) enumerates them. Share one result briefly so polling UIs do
+# not spawn back-to-back tool invocations.
+_ENUMERATION_CACHE_TTL = 10.0
+
+
+class _TtlCache:
+    """Monotonic-TTL cache holding one enumeration result (or nothing)."""
+
+    def __init__(self) -> None:
+        self._devices: list[dict[str, Any]] | None = None
+        self._time = 0.0
+
+    def clear(self) -> None:
+        self._devices = None
+        self._time = 0.0
+
+    def store(self, devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        self._devices = devices
+        self._time = time.monotonic()
+        return devices
+
+    def get(self) -> list[dict[str, Any]] | None:
+        if self._devices is None:
+            return None
+        if time.monotonic() - self._time > _ENUMERATION_CACHE_TTL:
+            return None
+        return self._devices
+
+
+_simulator_cache = _TtlCache()
+_core_device_cache = _TtlCache()
 
 
 def clear_ios_simulator_cache() -> None:
     """Drop the cached enumeration (e.g. after the driver boots a simulator)."""
-    global _simulator_cache, _simulator_cache_time
-    _simulator_cache = None
-    _simulator_cache_time = 0.0
+    _simulator_cache.clear()
 
 
-def _cache_simulators(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    global _simulator_cache, _simulator_cache_time
-    _simulator_cache = devices
-    _simulator_cache_time = time.monotonic()
-    return devices
-
-
-def _cached_simulators() -> list[dict[str, Any]] | None:
-    if _simulator_cache is None:
-        return None
-    if time.monotonic() - _simulator_cache_time > _SIMULATOR_CACHE_TTL:
-        return None
-    return _simulator_cache
+async def reap_process(process: asyncio.subprocess.Process) -> None:
+    """Kill a still-running child and drain its pipes; never raises."""
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    await process.communicate()
 
 
 async def run_xcrun(*arguments: str, timeout: float = 30.0) -> bytes:
@@ -76,12 +102,7 @@ async def run_xcrun(*arguments: str, timeout: float = 30.0) -> bytes:
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
     except (TimeoutError, asyncio.CancelledError):
-        if process.returncode is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-        await process.communicate()
+        await reap_process(process)
         raise
     if process.returncode:
         raise RuntimeError(
@@ -111,12 +132,7 @@ async def plist_to_json(payload: bytes, timeout: float = 30.0) -> bytes:
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(input=payload), timeout)
     except (TimeoutError, asyncio.CancelledError):
-        if process.returncode is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-        await process.communicate()
+        await reap_process(process)
         raise
     if process.returncode != 0:
         raise RuntimeError(
@@ -128,6 +144,13 @@ async def plist_to_json(payload: bytes, timeout: float = 30.0) -> bytes:
 def simctl_available() -> bool:
     """Whether this host can enumerate iOS simulators at all."""
     return sys.platform == "darwin" and shutil.which("xcrun") is not None
+
+
+def parse_xcode_version(payload: bytes | str) -> str | None:
+    """Extract the Xcode version string from ``xcodebuild -version`` output."""
+    text = payload.decode(errors="replace") if isinstance(payload, bytes) else payload
+    match = re.search(r"Xcode\s+(\d+(?:\.\d+)*)", text)
+    return match.group(1) if match else None
 
 
 def parse_simctl_devices(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -151,13 +174,13 @@ async def list_ios_simulators(
 ) -> list[dict[str, Any]] | None:
     """All available iOS simulators, or ``None`` when enumeration fails.
 
-    Successful enumerations are cached for ``_SIMULATOR_CACHE_TTL`` seconds;
+    Successful enumerations are cached for ``_ENUMERATION_CACHE_TTL`` seconds;
     failures are never cached so callers retry against live simctl.
     """
     if not simctl_available():
         return None
     if not force_refresh:
-        cached = _cached_simulators()
+        cached = _simulator_cache.get()
         if cached is not None:
             return cached
     try:
@@ -166,7 +189,7 @@ async def list_ios_simulators(
         logger.debug(f"simctl device enumeration failed: {exc}")
         return None
     try:
-        return _cache_simulators(parse_simctl_devices(json.loads(raw)))
+        return _simulator_cache.store(parse_simctl_devices(json.loads(raw)))
     except (ValueError, TypeError) as exc:
         logger.debug(f"simctl device list parse failed: {exc}")
         return None
@@ -179,7 +202,7 @@ def list_ios_simulators_sync(
     if not simctl_available():
         return None
     if not force_refresh:
-        cached = _cached_simulators()
+        cached = _simulator_cache.get()
         if cached is not None:
             return cached
     try:
@@ -196,7 +219,7 @@ def list_ios_simulators_sync(
     if completed.returncode != 0:
         return None
     try:
-        return _cache_simulators(parse_simctl_devices(json.loads(completed.stdout)))
+        return _simulator_cache.store(parse_simctl_devices(json.loads(completed.stdout)))
     except (ValueError, TypeError) as exc:
         logger.debug(f"simctl device list parse failed: {exc}")
         return None
@@ -204,31 +227,24 @@ def list_ios_simulators_sync(
 
 # --- CoreDevice (physical iPhone/iPad) enumeration -------------------------
 
-DEVICECTL_QUERY_TIMEOUT = 20.0
-_core_device_cache: list[dict[str, Any]] | None = None
-_core_device_cache_time = 0.0
+DEVICECTL_ENUMERATE_TIMEOUT = 20.0
 
 
-def clear_core_device_cache() -> None:
-    """Drop the cached CoreDevice enumeration."""
-    global _core_device_cache, _core_device_cache_time
-    _core_device_cache = None
-    _core_device_cache_time = 0.0
-
-
-def _cache_core_devices(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    global _core_device_cache, _core_device_cache_time
-    _core_device_cache = devices
-    _core_device_cache_time = time.monotonic()
-    return devices
-
-
-def _cached_core_devices() -> list[dict[str, Any]] | None:
-    if _core_device_cache is None:
-        return None
-    if time.monotonic() - _core_device_cache_time > _SIMULATOR_CACHE_TTL:
-        return None
-    return _core_device_cache
+async def devicectl_screenshot(
+    device_id: str, destination: Path, timeout: float
+) -> None:
+    """Capture one PNG frame from a paired device via ``devicectl``."""
+    await run_xcrun(
+        "devicectl",
+        "device",
+        "capture",
+        "screenshot",
+        "--device",
+        device_id,
+        "--destination",
+        str(destination),
+        timeout=timeout,
+    )
 
 
 def _device_property(device: dict[str, Any], section: str, key: str) -> Any:
@@ -295,18 +311,18 @@ async def list_core_devices(
     if not simctl_available():
         return None
     if not force_refresh:
-        cached = _cached_core_devices()
+        cached = _core_device_cache.get()
         if cached is not None:
             return cached
     try:
         raw = await run_xcrun(
-            "devicectl", "list", "devices", "--json-output", "-", timeout=DEVICECTL_QUERY_TIMEOUT
+            "devicectl", "list", "devices", "--json-output", "-", timeout=DEVICECTL_ENUMERATE_TIMEOUT
         )
     except (OSError, RuntimeError, TimeoutError) as exc:
         logger.debug(f"devicectl device enumeration failed: {exc}")
         return None
     try:
-        return _cache_core_devices(parse_devicectl_devices(json.loads(raw)))
+        return _core_device_cache.store(parse_devicectl_devices(json.loads(raw)))
     except (ValueError, TypeError) as exc:
         logger.debug(f"devicectl device list parse failed: {exc}")
         return None
@@ -319,7 +335,7 @@ def list_core_devices_sync(
     if not simctl_available():
         return None
     if not force_refresh:
-        cached = _cached_core_devices()
+        cached = _core_device_cache.get()
         if cached is not None:
             return cached
     try:
@@ -328,7 +344,7 @@ def list_core_devices_sync(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            timeout=DEVICECTL_QUERY_TIMEOUT,
+            timeout=DEVICECTL_ENUMERATE_TIMEOUT,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.debug(f"devicectl device enumeration failed: {exc}")
@@ -336,7 +352,7 @@ def list_core_devices_sync(
     if completed.returncode != 0:
         return None
     try:
-        return _cache_core_devices(parse_devicectl_devices(json.loads(completed.stdout)))
+        return _core_device_cache.store(parse_devicectl_devices(json.loads(completed.stdout)))
     except (ValueError, TypeError) as exc:
         logger.debug(f"devicectl device list parse failed: {exc}")
         return None
@@ -350,15 +366,39 @@ def is_physical_ios(device: dict[str, Any]) -> bool:
     )
 
 
+def physical_ios_ready(device: dict[str, Any]) -> bool:
+    """Whether a CoreDevice entry is a paired, reachable physical iOS device.
+
+    ``connection_state`` (CoreDevice ``tunnelState``) may be absent on paired
+    USB devices running older iOS — an absent value is acceptable;
+    ``"disconnected"`` is not. Every consumer (pool validators, readiness
+    probe, replay manager, driver) must agree on this rule.
+    """
+    if not is_physical_ios(device):
+        return False
+    if device.get("pairing_state") != "paired":
+        return False
+    return device.get("connection_state") in ("connected", None)
+
+
+def device_matches_identifier(device: dict[str, Any], identifier: str) -> bool:
+    """Match a device entry by case-insensitive UDID or exact name."""
+    if not identifier:
+        return False
+    return (
+        str(device.get("udid") or "").lower() == identifier.lower()
+        or device.get("name") == identifier
+    )
+
+
 def find_physical_ios_device_sync(identifier: str) -> dict[str, Any] | None:
     """Match a physical iOS device by UDID or exact name, or ``None``."""
     devices = list_core_devices_sync()
     if devices is None or not identifier:
         return None
-    needle = identifier.lower()
     for device in devices:
         if not is_physical_ios(device):
             continue
-        if device.get("udid", "").lower() == needle or device.get("name") == identifier:
+        if device_matches_identifier(device, identifier):
             return device
     return None

@@ -23,7 +23,6 @@ devicectl round-trip time).
 
 import asyncio
 import contextlib
-from io import BytesIO
 from pathlib import Path
 import tempfile
 import time
@@ -33,8 +32,11 @@ from uuid import uuid4
 from PIL import Image
 
 from artemis.config.paths import get_temp_dir
-from artemis.drivers.ios.discovery import run_xcrun
-from artemis.drivers.ios.recording import IosRecordingSession
+from artemis.drivers.ios.discovery import devicectl_screenshot, reap_process
+from artemis.drivers.ios.recording import (
+    DEFAULT_MAX_DURATION_SECONDS,
+    IosRecordingSession,
+)
 from artemis.utils.video import get_ffmpeg_path, probe_video_segment, write_recording_manifest
 from third_party.mobile_use.utils.logger import get_logger
 
@@ -42,6 +44,8 @@ logger = get_logger(__name__)
 
 CAPTURE_TIMEOUT_SECONDS = 15.0
 WATCHDOG_INTERVAL_SECONDS = 0.5
+# devicectl frame polls flake more often than the managed simctl process, so
+# the failure cap and the ffmpeg budget are looser than in recording.py.
 MAX_CONSECUTIVE_FAILURES = 5
 
 
@@ -62,8 +66,7 @@ async def _run_ffmpeg(arguments: list[str]) -> tuple[int, bytes]:
             process.communicate(), timeout=FFMPEG_TIMEOUT_SECONDS
         )
     except TimeoutError:
-        process.kill()
-        await process.wait()
+        await reap_process(process)
         return -1, b"ffmpeg timed out"
     return process.returncode, stderr
 
@@ -85,7 +88,7 @@ class PhysicalIosRecorder:
         self._session: IosPhysicalRecordingSession | None = None
         self._output_dir: Path | None = None
         self._lock = asyncio.Lock()
-        self._max_duration_seconds = 900
+        self._max_duration_seconds = DEFAULT_MAX_DURATION_SECONDS
         self._consecutive_failures = 0
 
     @property
@@ -102,16 +105,8 @@ class PhysicalIosRecorder:
         assert session.frames_dir is not None
         session.frame_index += 1
         path = session.frames_dir / f"frame_{session.frame_index:06d}.png"
-        await run_xcrun(
-            "devicectl",
-            "device",
-            "capture",
-            "screenshot",
-            "--device",
-            self._device_id,
-            "--destination",
-            str(path),
-            timeout=CAPTURE_TIMEOUT_SECONDS,
+        await devicectl_screenshot(
+            self._device_id, path, timeout=CAPTURE_TIMEOUT_SECONDS
         )
         captured_at = time.monotonic()
         if not path.exists() or path.stat().st_size == 0:
@@ -346,7 +341,7 @@ class PhysicalIosRecorder:
     async def start(
         self,
         output_dir: Path | None = None,
-        max_duration_seconds: int = 900,
+        max_duration_seconds: int = DEFAULT_MAX_DURATION_SECONDS,
     ) -> IosPhysicalRecordingSession:
         async with self._lock:
             if self._session is not None and self._session.is_active:

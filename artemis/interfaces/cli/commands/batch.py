@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Annotated
 
 from artemis.config import initialize_llm_config
+from artemis.drivers.ios.discovery import BOOTED_SIMULATOR_ID
+from artemis.runtime.adb_endpoint import normalize_device_platform
 from artemis.sdk import Agent
 from artemis.sdk.builders import Builders
 from third_party.mobile_use.sdk.types.task import AgentProfile
@@ -65,9 +67,9 @@ async def run_batch_tasks(
         config_builder.with_verification_level(verification_level)
     if explorer_pro_mode is not None:
         config_builder.with_explorer(pro_mode=explorer_pro_mode)
-    if platform.lower() == "ios":
+    if normalize_device_platform(platform, strict=False) == "ios":
         config_builder.for_ios_simulator(
-            device_id=device_serial or "booted",
+            device_id=device_serial or BOOTED_SIMULATOR_ID,
             workspace_path=ios_workspace,
         )
     elif device_serial:
@@ -204,13 +206,14 @@ def batch_command(
     ] = None,
 ) -> None:
     """Execute multiple automation tasks in sequence."""
-    platform = platform.strip().lower()
-    if platform not in ("android", "ios"):
+    try:
+        platform = normalize_device_platform(platform)
+    except ValueError as exc:
         typer.secho(
             f"Error: --platform must be 'android' or 'ios' (got '{platform}').",
             fg=typer.colors.RED,
         )
-        raise typer.Exit(1)
+        raise typer.Exit(1) from exc
     if ios_workspace is not None and platform != "ios":
         typer.secho("Error: --ios-workspace requires --platform ios.", fg=typer.colors.RED)
         raise typer.Exit(1)

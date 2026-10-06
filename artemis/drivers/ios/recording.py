@@ -30,6 +30,7 @@ from typing import Any
 from uuid import uuid4
 
 from artemis.config.paths import get_temp_dir
+from artemis.drivers.ios.discovery import reap_process
 from artemis.utils.video import (
     get_ffmpeg_path,
     probe_video_segment,
@@ -41,6 +42,8 @@ from third_party.mobile_use.utils.video import RecordingSession
 logger = get_logger(__name__)
 
 RECORDING_STARTED_MARKER = "Recording started"
+# Longest a single iOS capture may run before auto-stopping (15 minutes).
+DEFAULT_MAX_DURATION_SECONDS = 900
 STARTUP_TIMEOUT_SECONDS = 30.0
 SIGINT_FLUSH_TIMEOUT_SECONDS = 10.0
 TERMINATE_TIMEOUT_SECONDS = 3.0
@@ -113,13 +116,7 @@ async def probe_display_dimensions(device_id: str) -> tuple[int, int] | None:
     return _parse_display_dimensions(stdout.decode(errors="replace"))
 
 
-async def _reap_probe(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is None:
-        try:
-            process.kill()
-        except ProcessLookupError:
-            pass
-    await process.communicate()
+_reap_probe = reap_process
 
 
 async def finalize_mov_to_mp4(
@@ -187,12 +184,7 @@ async def finalize_mov_to_mp4(
                 probe_video_segment(temporary_path), PROBES_TIMEOUT_SECONDS * 10
             )
         except TimeoutError:
-            if process.returncode is None:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-            await process.communicate()
+            await reap_process(process)
             raise RuntimeError("iOS recording finalization timed out")
         valid = (
             process.returncode == 0
@@ -225,7 +217,7 @@ class IosScreenRecorder:
         self._session: IosRecordingSession | None = None
         self._output_dir: Path | None = None
         self._lock = asyncio.Lock()
-        self._max_duration_seconds = 900
+        self._max_duration_seconds = DEFAULT_MAX_DURATION_SECONDS
         self._consecutive_failures = 0
         self._conversion_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CONVERSIONS)
 
@@ -468,7 +460,7 @@ class IosScreenRecorder:
     async def start(
         self,
         output_dir: Path | None = None,
-        max_duration_seconds: int = 900,
+        max_duration_seconds: int = DEFAULT_MAX_DURATION_SECONDS,
     ) -> IosRecordingSession:
         async with self._lock:
             if self._session is not None and self._session.is_active:

@@ -20,7 +20,6 @@ device.
 """
 
 import asyncio
-import re
 
 from artemis.core.diagnostics.probes.base import BaseProbe
 from artemis.core.diagnostics.schema import (
@@ -33,16 +32,19 @@ from artemis.drivers.ios.discovery import (
     is_physical_ios,
     list_core_devices,
     list_ios_simulators,
+    parse_xcode_version,
+    physical_ios_ready,
     run_xcrun,
     simctl_available,
 )
 
 
-class IosSimulatorProbe(BaseProbe):
-    """Reports iOS Simulator automation capability (Xcode 27+ on macOS)."""
+class IosDeviceProbe(BaseProbe):
+    """Reports iOS automation capability: Xcode 27+, simulators, physical."""
 
     @property
     def probe_id(self) -> str:
+        # Historical id kept stable: persisted reports reference it.
         return "ios_simulators"
 
     @property
@@ -63,8 +65,8 @@ class IosSimulatorProbe(BaseProbe):
                 is_blocker=self.is_blocker,
                 summary="Unavailable",
                 description=(
-                    "iOS Simulator automation requires macOS with Xcode 27+; "
-                    "this host cannot enumerate simulators."
+                    "iOS automation requires macOS with Xcode 27+; "
+                    "this host cannot enumerate iOS devices."
                 ),
                 metadata={"platform_supported": False},
             )
@@ -73,9 +75,8 @@ class IosSimulatorProbe(BaseProbe):
         xcode_version: str | None = None
         try:
             raw = await asyncio.wait_for(run_xcrun("xcodebuild", "-version"), timeout=15.0)
-            match = re.search(rb"Xcode\s+(\d+(?:\.\d+)*)", raw)
-            if match:
-                xcode_version = match.group(1).decode()
+            xcode_version = parse_xcode_version(raw)
+            if xcode_version:
                 xcode_ok = int(xcode_version.split(".")[0]) >= 27
         except (OSError, RuntimeError, TimeoutError):
             xcode_version = None
@@ -84,12 +85,7 @@ class IosSimulatorProbe(BaseProbe):
         booted = [d for d in (simulators or []) if d.get("state") == "Booted"]
         core_devices = await list_core_devices()
         physical = [d for d in (core_devices or []) if is_physical_ios(d)]
-        connected = [
-            d
-            for d in physical
-            if d.get("pairing_state") == "paired"
-            and d.get("connection_state") == "connected"
-        ]
+        connected = [d for d in physical if physical_ios_ready(d)]
         metadata = {
             "platform_supported": True,
             "xcode_version": xcode_version,
@@ -162,3 +158,7 @@ class IosSimulatorProbe(BaseProbe):
             ),
             metadata=metadata,
         )
+
+
+# Backward-compatible name from when the probe only covered simulators.
+IosSimulatorProbe = IosDeviceProbe
