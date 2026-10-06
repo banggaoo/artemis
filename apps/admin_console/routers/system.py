@@ -98,7 +98,7 @@ class SelectDeviceRequest(BaseModel):
     serial: str = Field(description="Serial number or identifier of the device to select")
     platform: str = Field(
         default="android",
-        description="Device platform: 'android' (default) or 'ios' (simulator UDID)",
+        description="Device platform: 'android' (default) or 'ios' (device UDID)",
     )
 
 
@@ -110,7 +110,7 @@ async def get_system_readiness(force: bool = False) -> SystemReadinessReport:
 
 @router.post("/devices/select")
 async def select_active_device(request: SelectDeviceRequest):
-    """Select the active device or iOS simulator for subsequent automated tasks."""
+    """Select the active Android or iOS device for subsequent automated tasks."""
     serial = request.serial.strip()
     if not serial:
         raise HTTPException(status_code=400, detail="Device serial cannot be empty.")

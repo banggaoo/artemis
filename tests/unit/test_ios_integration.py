@@ -110,7 +110,7 @@ def test_factory_selects_ios_without_creating_adb(native_driver, monkeypatch):
     monkeypatch.setattr("artemis.drivers.factory.AdbClient", adb)
     context = ios_context()
     assert create_driver(context) is native_driver
-    native_driver.constructor.assert_called_once_with(device_id="booted", workspace_path=None)
+    native_driver.constructor.assert_called_once_with(device_id="booted", width=1170, height=2532, workspace_path=None)
     assert context.adb_client is None
 
 
@@ -125,13 +125,13 @@ def test_factory_forwards_configured_ios_workspace(native_driver, tmp_path):
         .build(validate_profiles=False)
     )
     assert create_driver(context) is native_driver
-    native_driver.constructor.assert_called_once_with(device_id="booted", workspace_path=project)
+    native_driver.constructor.assert_called_once_with(device_id="booted", width=1170, height=2532, workspace_path=project)
 
 
 def test_factory_tolerates_missing_agent_config(native_driver):
     context = ios_context()
     assert create_driver(context) is native_driver
-    native_driver.constructor.assert_called_once_with(device_id="booted", workspace_path=None)
+    native_driver.constructor.assert_called_once_with(device_id="booted", width=1170, height=2532, workspace_path=None)
 
 
 def test_macos_host_keeps_android_default(monkeypatch):
@@ -502,7 +502,7 @@ def test_flash_and_pro_prompts_teach_ios_constraints(native_driver):
     prompts = {"main_template": PLAN_HISTORY_TEMPLATE_SECTION + "\n# CURRENT OBSERVATION"}
     pro = render_transcript_static_system(prompts, context, State.initial("Open Settings"))
     for prompt in (flash, pro):
-        assert "iOS Simulator" in prompt
+        assert "Target platform: iOS." in prompt
         assert "clear_exist=false" in prompt
         assert (
             "press_key supports enter, home, "

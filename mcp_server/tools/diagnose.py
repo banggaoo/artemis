@@ -482,15 +482,23 @@ async def _run_device_probe(
 ) -> dict[str, Any]:
     if platform == "ios":
         simulators = (ios_result.metadata.get("simulators") if ios_result else None) or []
-        ready_udids = [str(d.get("udid")) for d in simulators if d.get("udid")]
+        physical = (
+            ios_result.metadata.get("connected_physical_devices") if ios_result else None
+        ) or []
+        ready_udids = [str(d.get("udid")) for d in simulators if d.get("udid")] + [
+            str(d.get("udid")) for d in physical if d.get("udid")
+        ]
         if requested_device and requested_device not in ready_udids:
             return _probe_unavailable(
                 requested_device,
-                f"requested iOS simulator '{requested_device}' is not available; nothing to probe",
+                f"requested iOS device '{requested_device}' is not available "
+                "(simulators plus paired+connected physical devices); nothing to probe",
             )
         if not ready_udids:
-            return _probe_unavailable(None, "no available iOS simulator found; nothing to probe")
-        serial = requested_device or (ready_udids[0] if len(ready_udids) == 1 else None)
+            return _probe_unavailable(None, "no available iOS device found; nothing to probe")
+        # Auto-pick only a lone simulator — never silently choose hardware.
+        sim_udids = [str(d.get("udid")) for d in simulators if d.get("udid")]
+        serial = requested_device or (sim_udids[0] if len(sim_udids) == 1 else None)
         try:
             return await _device_smoke_test(serial, platform="ios")
         except Exception as exc:
@@ -1046,10 +1054,13 @@ def _requested_device_ready(
         if ios_result is None:
             return False
         simulators = ios_result.metadata.get("simulators") or []
-        return any(
+        if any(
             d.get("udid") == requested_device and d.get("state") in ("Booted", "Shutdown")
             for d in simulators
-        )
+        ):
+            return True
+        physical = ios_result.metadata.get("connected_physical_devices") or []
+        return any(d.get("udid") == requested_device for d in physical)
     adb_result = _find(results, "android_adb")
     if adb_result is None:
         return False
@@ -1235,8 +1246,9 @@ async def mobile_diagnose(
           the device, or the screen stays black. A failed probe makes the
           verdict "blocked" and lists the fix.
         platform: 'android' (default) or 'ios'. With 'ios', `device_serial`
-          is a simulator UDID and `probe_device` exercises the native Xcode
-          path; ADB-only extras (AVD launch, accessibility helper) are skipped.
+          is a simulator or paired physical UDID and `probe_device` exercises
+          the native path (Xcode MCP for simulators, WebDriverAgent for
+          hardware); ADB-only extras (AVD launch, accessibility helper) are skipped.
     """
     fixes_applied: list[dict[str, Any]] = []
     platform_name = (platform or "android").strip().lower()

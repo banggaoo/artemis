@@ -52,8 +52,8 @@ async def run_batch_tasks(
             'strict') for the Pro profile; ignored by Flash.
         explorer_pro_mode: Explorer tier ('flash', 'pro', 'ultra') behind
             ``ask_explorer`` under the Pro profile; ignored by Flash.
-        platform: 'android' (default) or 'ios' (local iOS Simulator).
-        device_serial: Android serial or iOS simulator UDID for all tasks.
+        platform: 'android' (default) or 'ios' (local simulator or paired device).
+        device_serial: Android serial or iOS device UDID for all tasks.
         ios_workspace: Xcode project/workspace for first-run iOS approval.
     """
     if not os.environ.get("ARTEMIS_TASK_INGRESS"):
@@ -181,14 +181,14 @@ def batch_command(
         str,
         typer.Option(
             "--platform",
-            help="Target mobile platform: 'android' (default) or 'ios' (local iOS simulator).",
+            help="Target mobile platform: 'android' (default) or 'ios' (local simulator or paired device).",
         ),
     ] = "android",
     device_serial: Annotated[
         str | None,
         typer.Option(
             "--device-serial",
-            help="Android serial or iOS simulator UDID for every task in the batch.",
+            help="Android serial or iOS device UDID (simulator or paired physical device) for every task in the batch.",
         ),
     ] = None,
     ios_workspace: Annotated[
