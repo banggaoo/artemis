@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from artemis.core.diagnostics import readiness_engine
 from artemis.runtime import DeviceExecutionLock, device_pool, ios_device_pool
+from artemis.runtime.adb_endpoint import IOS_LOCK_SCOPE
 
 try:
     from admin_console.core.state import state
@@ -302,6 +303,7 @@ async def get_status():
             "pid": owner.pid,
             "ingress": owner.ingress,
             "acquired_at": owner.acquired_at,
+            "platform": "ios" if getattr(owner, "lock_scope", None) == IOS_LOCK_SCOPE else "android",
         }
         for owner in active_owners.values()
     ]

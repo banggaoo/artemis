@@ -113,12 +113,21 @@ def simulator(tmp_path, monkeypatch):
         if arguments == ("simctl", "list", "devices", "--json"):
             return json.dumps(inventory).encode()
         if arguments[:2] == ("simctl", "listapps"):
-            return plistlib.dumps({"com.example.app": {"CFBundleDisplayName": "Example"}})
+            # Real simctl emits an OpenStep/ASCII plist that plistlib cannot
+            # parse — the driver must route it through plutil.
+            return (
+                b'{ "com.example.app" = { CFBundleDisplayName = Example; '
+                b'CFBundleIdentifier = "com.example.app"; }; }'
+            )
         return b""
+
+    async def fake_plutil(payload: bytes, timeout: float = 30.0) -> bytes:
+        return json.dumps({"com.example.app": {"CFBundleDisplayName": "Example"}}).encode()
 
     commands = AsyncMock(side_effect=command)
     monkeypatch.setattr(xcode_driver.sys, "platform", "darwin")
     monkeypatch.setattr(xcode_driver, "run_xcrun", commands)
+    monkeypatch.setattr(xcode_driver, "plist_to_json", fake_plutil)
     monkeypatch.setattr(xcode_driver, "XcodeBridge", lambda: native)
     return SimpleNamespace(
         driver=XcodeSimulatorDriver(),

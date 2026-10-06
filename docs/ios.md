@@ -113,9 +113,7 @@ Configure iOS through the embedded SDK's builder:
 from artemis.sdk import Agent
 from artemis.sdk.builders import AgentConfigBuilder
 
-config = (
-    AgentConfigBuilder().for_ios_simulator("<SIMULATOR-UDID>").with_default_profile("flash").build()
-)
+config = AgentConfigBuilder().for_ios_simulator("<SIMULATOR-UDID>").build()
 agent = Agent(config=config)
 ```
 

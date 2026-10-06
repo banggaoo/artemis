@@ -356,14 +356,16 @@ async def smoke_test_device(
             "controller-init",
         )
     except TimeoutError:
+        label = "iOS driver" if is_ios else "UIAutomator/controller"
         return _finish(
-            f"UIAutomator/controller initialization did not respond within {timeout_seconds:g}s"
+            f"{label} initialization did not respond within {timeout_seconds:g}s"
         )
     except _PASSTHROUGH_EXCEPTIONS:
         raise
     except BaseException as exc:  # pylint: disable=broad-exception-caught
         cause = _describe_failure(exc)
-        return _finish(f"Failed to initialize Android device controller: {cause}", cause)
+        target = "iOS device" if is_ios else "Android device"
+        return _finish(f"Failed to initialize {target} controller: {cause}", cause)
 
     controller_ctx = getattr(controller, "ctx", None)
     device = getattr(controller_ctx, "device", None)
@@ -386,7 +388,8 @@ async def smoke_test_device(
             "screen-data",
         )
     except TimeoutError:
-        return _finish(f"UIAutomator/screen capture did not respond within {timeout_seconds:g}s")
+        label = "iOS session capture" if is_ios else "UIAutomator/screen capture"
+        return _finish(f"{label} did not respond within {timeout_seconds:g}s")
     except _PASSTHROUGH_EXCEPTIONS:
         raise
     except BaseException as exc:  # pylint: disable=broad-exception-caught
@@ -411,8 +414,9 @@ async def smoke_test_device(
             f"Screenshot capture failed (driver returned a {result['screenshot_bytes']}-byte placeholder image)"
         )
     if not result["element_count"]:
+        backend = "Xcode accessibility tree" if is_ios else "UIAutomator hierarchy dump"
         return _finish(
-            "UIAutomator hierarchy dump returned no UI elements (screenshot worked, hierarchy did not)"
+            f"{backend} returned no UI elements (screenshot worked, hierarchy did not)"
         )
     return _finish(None)
 

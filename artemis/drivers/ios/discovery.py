@@ -76,12 +76,50 @@ async def run_xcrun(*arguments: str, timeout: float = 30.0) -> bytes:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
     except (TimeoutError, asyncio.CancelledError):
         if process.returncode is None:
-            process.kill()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
         await process.communicate()
         raise
     if process.returncode:
         raise RuntimeError(
             f"xcrun {' '.join(arguments[:3])} failed: {stderr.decode(errors='replace').strip()}"
+        )
+    return stdout
+
+
+async def plist_to_json(payload: bytes, timeout: float = 30.0) -> bytes:
+    """Convert an OpenStep/XML/binary plist payload to JSON via ``plutil``.
+
+    ``simctl listapps`` emits OpenStep (ASCII) plists that ``plistlib``
+    cannot read; ``plutil -convert json`` accepts every plist flavor.
+    """
+    process = await asyncio.create_subprocess_exec(
+        "plutil",
+        "-convert",
+        "json",
+        "-o",
+        "-",
+        "--",
+        "-",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(input=payload), timeout)
+    except (TimeoutError, asyncio.CancelledError):
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        await process.communicate()
+        raise
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"plutil conversion failed: {stderr.decode(errors='replace').strip()}"
         )
     return stdout
 
