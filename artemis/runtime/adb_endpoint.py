@@ -154,7 +154,7 @@ IOS_LOCK_SCOPE = "ios"
 
 @dataclass(frozen=True, slots=True)
 class IosTarget:
-    """An iOS simulator UDID bound to the local CoreSimulator service."""
+    """An iOS device UDID (simulator or paired physical device)."""
 
     serial: str | None = None
 
@@ -176,7 +176,7 @@ class IosTarget:
     ) -> MutableMapping[str, str]:
         target = environment if environment is not None else os.environ
         # LOCK_SCOPE_ENV names the execution scope generically: the ADB
-        # endpoint identity for Android, the platform tag for iOS simulators.
+        # endpoint identity for Android, the platform tag for iOS devices.
         target[ADB_ENDPOINT_ID_ENV] = self.lock_scope
         # An iOS worker never touches ADB: a stale serial must not leak in.
         target.pop("ADB_DEVICE_SERIAL", None)

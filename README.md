@@ -104,12 +104,14 @@ cd artemis
 
 > **Tip**: Opens `http://localhost:8000` in your default browser with a device connection wizard, live screen mirroring, prompt sandbox, and execution replays. You can also run directly from CLI: `uv run artemis run "Open Settings, find Battery and tell me current level" --profile flash`.
 
-### iOS Simulator (macOS, Xcode 27+)
+### iOS Devices (macOS, Xcode 27+)
 
 CLI, embedded Python SDK, web console, and daemon tasks can target iOS
-simulators through Xcode's native MCP device-interaction tools. See the
+simulators through Xcode's native MCP device-interaction tools, and paired
+physical iPhones/iPads through `devicectl` plus a WebDriverAgent runner
+installed on the device. See the
 [iOS setup and usage guide](./docs/ios.md) for prerequisites, Xcode access
-approval, and current limits:
+approval, WDA setup, and current limits:
 
 ```bash
 bash scripts/setup_ios_env.sh
@@ -313,7 +315,7 @@ ARTEMIS supports two execution profiles tailored for different automation requir
 ## Roadmap
 
 - [ ] **Android Studio Integration**: Native IDE plugin and workflow integration to enable in-editor debugging, test recording, and automated device control directly within Android Studio.
-- [x] **iOS Platform Expansion**: [iOS Simulator support](./docs/ios.md) is available with Xcode 27+ across the CLI, SDK, web console, daemon, MCP, replay, and streaming; physical iPhone/iPad support is delivered in a stacked follow-up change.
+- [x] **iOS Platform Expansion**: [iOS support](./docs/ios.md) is available with Xcode 27+ across the CLI, SDK, web console, daemon, MCP, replay, and streaming, covering simulators and paired physical devices.
 - [ ] **On-Device Lightweight VLMs**: Local execution with lightweight edge vision models for low-latency, privacy-first automation.
 - [ ] **Real-time Duplex Voice Interaction**: Voice-driven task dispatch with real-time conversational control and interruption handling.
 

@@ -15,7 +15,7 @@
 """Device Live Screen Streaming Service.
 
 Provides real-time, low-latency device screen frames over HTTP MJPEG and WebSocket.
-Android frames come from ``adb exec-out screencap``; iOS Simulator frames come
+Android frames come from ``adb exec-out screencap``; iOS frames come
 from the native ``xcrun simctl io <UDID> screenshot`` capture. The target is
 picked per frame so the stream follows whichever platform is under automation.
 """
@@ -50,7 +50,7 @@ class DeviceStreamService:
     async def get_stream_target(self) -> dict[str, str] | None:
         """Pick the device the stream should follow right now.
 
-        An actively locked iOS simulator wins (it is the device under
+        An actively locked iOS device wins (it is the device under
         automation), then a connected Android device, then the single
         unambiguous booted simulator. Returns ``{"platform", "serial"}``.
         """
@@ -115,16 +115,29 @@ class DeviceStreamService:
         return stdout if proc.returncode == 0 and len(stdout) > 1000 else None
 
     async def _capture_ios(self, udid: str) -> bytes | None:
-        """One PNG frame from the simulator's framebuffer via simctl.
+        """One PNG frame via simctl (simulator) or devicectl (physical).
 
-        ``simctl io screenshot`` only writes files (``-`` is not a stdout
-        sink on Xcode 27), so frames stream through one reused temp path.
+        Both tools only write files, so frames stream through one reused temp
+        path per UDID.
         """
-        # Reused path per UDID: the loop is serialized, and simctl writes the
-        # file itself, so no per-frame temp file churn is needed.
+        from artemis.drivers.ios.discovery import find_physical_ios_device_sync
+
         frame_path = Path(get_temp_dir("streams")) / f"ios_stream_{udid}.png"
-        try:
-            proc = await asyncio.create_subprocess_exec(
+        physical = await asyncio.to_thread(find_physical_ios_device_sync, udid)
+        if physical is not None:
+            cmd = [
+                "xcrun",
+                "devicectl",
+                "device",
+                "capture",
+                "screenshot",
+                "--device",
+                udid,
+                "--destination",
+                str(frame_path),
+            ]
+        else:
+            cmd = [
                 "xcrun",
                 "simctl",
                 "io",
@@ -132,6 +145,10 @@ class DeviceStreamService:
                 "screenshot",
                 "--type=png",
                 str(frame_path),
+            ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )

@@ -157,7 +157,7 @@ def _validate_device_serial(device_serial: str, platform: str = "android") -> di
         # the task proceeds and fails downstream with a clear no-device error.
         if platform == "ios":
             detail = ios_device_pool.validate_explicit_serial(device_serial)
-            inspect_hint = "Run `xcrun simctl list devices` to inspect simulators"
+            inspect_hint = "Run `xcrun simctl list devices` (simulators) or `xcrun devicectl list devices` (physical devices)"
         else:
             detail = device_pool.validate_explicit_serial(device_serial)
             inspect_hint = "Run `adb devices -l` to inspect attached hardware"
@@ -267,21 +267,20 @@ def mobile_run_task(
         model: `"Flash"` or `"Pro"` — see model selection above.
         locked_app_package: Optional package name to lock execution to; the
           agent auto-launches it and restricts actions to that app.
-        app_path: Optional local app path to install before running (APK for
-          Android, a simulator-built `.app` directory for iOS).
+        app_path: Optional local APK (Android) or signed .app/.ipa (iOS) to install before running.
         expected_output_desc: Optional, Pro only. If set, a summarization agent
           writes a report to `output.md` in `notes_dir`. Ignored for Flash.
-        device_serial: Optional device serial to bind execution to a specific
-          device; distinct devices run concurrently. For `platform="android"`,
-          an ADB serial (e.g. "emulator-5554"). For `platform="ios"`, a
-          simulator UDID (`xcrun simctl list devices` lists them); omit to
-          auto-select a booted simulator.
-        platform: Optional target platform: `"android"` (default, ADB) or
-          `"ios"` (local Xcode 27 simulator). iOS requires macOS; locked-app
-          mode is not supported on iOS.
-        ios_workspace: Optional Xcode project/workspace path used to request
-          first-run device-interaction approval for iOS runs. Ignored for
-          Android.
+        device_serial: Optional device serial (e.g. "emulator-5554" or an iOS
+          device UDID) to bind execution to a specific device; distinct devices
+          run concurrently. If omitted, an available device is selected
+          automatically (physical iOS hardware is never auto-selected). When
+          several devices are attached, confirm the target with the user first
+          (`adb devices -l` lists Android serials; `xcrun devicectl list
+          devices` lists physical iOS UDIDs).
+        platform: `"android"` (default) or `"ios"` — iOS runs locally against
+          a simulator or paired physical device.
+        ios_workspace: Optional Xcode workspace path for iOS; scopes the
+          agent-access approval grant (simulator interaction only).
         verification_level: Optional, Pro only. Coarse Checker preset: `"off"`
           (no audit; the Operator self-reports), `"final"` (one exit review
           against the goal, the default), `"checkpoints"` (every plan
