@@ -67,11 +67,8 @@ class UnifiedMobileController(UnifiedMobileControllerBase):
 
     async def erase_text(self, nb_chars: int | None = None) -> bool:
         if self.ctx.device.mobile_platform == "ios":
-            if nb_chars is not None and nb_chars > 0:
-                for _ in range(nb_chars):
-                    if not await self._driver.press_key("delete"):
-                        return False
-                return True
+            # No native clear/Backspace key exists; the driver raises
+            # NotImplementedError for unsupported clear operations.
             return await self._driver.input_text("", clear_existing=True)
         return await super().erase_text(nb_chars)
 

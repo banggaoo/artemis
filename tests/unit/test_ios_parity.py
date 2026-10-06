@@ -18,9 +18,8 @@ Every test is hermetic — ``simctl``/``xcrun``/adb are never invoked; device
 enumeration is stubbed at the discovery boundary.
 """
 
-import asyncio
 import os
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
