@@ -48,6 +48,7 @@ STARTUP_TIMEOUT_SECONDS = 30.0
 SIGINT_FLUSH_TIMEOUT_SECONDS = 10.0
 TERMINATE_TIMEOUT_SECONDS = 3.0
 PROBES_TIMEOUT_SECONDS = 3.0
+SEGMENT_PROBE_TIMEOUT_SECONDS = 30.0
 FFMPEG_TIMEOUT_SECONDS = 120.0
 WATCHDOG_INTERVAL_SECONDS = 0.5
 MAX_CONSECUTIVE_FAILURES = 3
@@ -177,15 +178,20 @@ async def finalize_mov_to_mp4(
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            _stdout, stderr = await asyncio.wait_for(
-                process.communicate(), FFMPEG_TIMEOUT_SECONDS
-            )
-            metadata = await asyncio.wait_for(
-                probe_video_segment(temporary_path), PROBES_TIMEOUT_SECONDS * 10
+            _stdout, stderr = await asyncio.wait_for(process.communicate(), FFMPEG_TIMEOUT_SECONDS)
+            metadata = await probe_video_segment(
+                temporary_path, timeout_seconds=SEGMENT_PROBE_TIMEOUT_SECONDS
             )
         except TimeoutError:
             await reap_process(process)
             raise RuntimeError("iOS recording finalization timed out")
+        except asyncio.CancelledError:
+            # Reap the owned ffmpeg child and drop the partial .mp4 before
+            # cancellation propagates — never leave an orphan encoder behind.
+            await reap_process(process)
+            if temporary_path.exists():
+                temporary_path.unlink()
+            raise
         valid = (
             process.returncode == 0
             and temporary_path.exists()
@@ -320,34 +326,45 @@ class IosScreenRecorder:
         )
         first_frame: asyncio.Future = asyncio.get_running_loop().create_future()
         session.stderr_task = asyncio.create_task(self._drain_stderr(process, session, first_frame))
+        started = False
         try:
             marker_wall, marker_monotonic = await asyncio.wait_for(
                 asyncio.shield(first_frame), STARTUP_TIMEOUT_SECONDS
             )
-        except BaseException:
-            if not first_frame.done():
-                first_frame.cancel()
-            session.stderr_task.cancel()
-            reap = asyncio.ensure_future(self._reap(process))
-            try:
-                await asyncio.shield(reap)
-            except asyncio.CancelledError:
-                await reap  # finish reaping even when the caller was cancelled
-            raise
-        session.process = process
-        session.local_video_path = source_path
-        session.segment_started_at = marker_wall
-        session.segment_started_monotonic = marker_monotonic
-        if session.anchor_monotonic is None:
-            session.start_time = marker_wall
-            session.anchor_monotonic = marker_monotonic
-        dimensions = await probe_display_dimensions(self._device_id)
-        if dimensions:
-            session.capture_width, session.capture_height = dimensions
-        logger.info(
-            f"iOS recording segment {index} first frame "
-            f"{marker_wall - session.start_time:.2f}s after anchor on {self._device_id}"
-        )
+            session.process = process
+            session.local_video_path = source_path
+            session.segment_started_at = marker_wall
+            session.segment_started_monotonic = marker_monotonic
+            if session.anchor_monotonic is None:
+                session.start_time = marker_wall
+                session.anchor_monotonic = marker_monotonic
+            dimensions = await probe_display_dimensions(self._device_id)
+            if dimensions:
+                session.capture_width, session.capture_height = dimensions
+            logger.info(
+                f"iOS recording segment {index} first frame "
+                f"{marker_wall - session.start_time:.2f}s after anchor on {self._device_id}"
+            )
+            started = True
+        finally:
+            if not started:
+                # Startup never completed: the spawned recorder is still
+                # owned by this coroutine — drain stderr and reap it before
+                # the original exception/cancellation propagates.
+                if not first_frame.done():
+                    first_frame.cancel()
+                session.stderr_task.cancel()
+                try:
+                    await session.stderr_task
+                except asyncio.CancelledError:
+                    pass
+                except (OSError, RuntimeError, ValueError, TimeoutError) as stderr_error:
+                    logger.debug(f"iOS recorder stderr drain ended with an error: {stderr_error}")
+                reap = asyncio.ensure_future(self._reap(process))
+                try:
+                    await asyncio.shield(reap)
+                except asyncio.CancelledError:
+                    await reap  # finish reaping even when the caller was cancelled
 
     def _seal_current_segment(
         self, session: IosRecordingSession, end_monotonic: float
@@ -402,19 +419,29 @@ class IosScreenRecorder:
             logger.info(f"Rolling iOS recording segment after {reason}")
         restarted = False
         if session.is_active:
-            try:
-                await self._spawn_recorder(session)
-                restarted = True
-            except asyncio.CancelledError:
-                raise
-            except (OSError, RuntimeError, TimeoutError) as exc:
-                self._consecutive_failures += 1
-                session.errors.append(f"Recorder restart failed: {exc}")
+            if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                # Spawns that keep dying young are a crash loop: stop
+                # respawning (the sealed segment still converts below).
+                session.is_active = False
+                session.errors.append("Recording recovery limit reached; session stopped")
+            else:
+                try:
+                    await self._spawn_recorder(session)
+                    restarted = True
+                except asyncio.CancelledError:
+                    raise
+                except (OSError, RuntimeError, TimeoutError) as exc:
+                    self._consecutive_failures += 1
+                    session.errors.append(f"Recorder restart failed: {exc}")
         if record is not None:
             session.conversion_tasks.append(
                 asyncio.create_task(self._convert_record(session, record))
             )
-        if not restarted and self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+        if (
+            not restarted
+            and session.is_active
+            and self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES
+        ):
             session.errors.append("Recording recovery limit reached; session stopped")
             session.is_active = False
 
@@ -482,13 +509,15 @@ class IosScreenRecorder:
                 is_active=True,
             )
             self._session = session
+            started = False
             try:
                 await self._spawn_recorder(session)
-            except BaseException:
-                session.is_active = False
-                raise
-            session.watchdog_task = asyncio.create_task(self._watchdog(session))
-            return session
+                session.watchdog_task = asyncio.create_task(self._watchdog(session))
+                started = True
+                return session
+            finally:
+                if not started:
+                    session.is_active = False
 
     async def seal(self, through_time: float | None = None) -> None:
         """Seal the current segment through ``through_time`` (recording-relative)."""
@@ -555,7 +584,16 @@ class IosScreenRecorder:
             if record.get("conversion_done") and Path(record["output_path"]).exists()
         }
         output_dir = mp4_paths[0].parent
-        manifest = await write_recording_manifest(output_dir, mp4_paths, offsets)
+        try:
+            manifest = await write_recording_manifest(
+                output_dir,
+                mp4_paths,
+                offsets,
+                probe_timeout_seconds=SEGMENT_PROBE_TIMEOUT_SECONDS,
+            )
+        except (OSError, TimeoutError) as exc:
+            session.errors.append(f"Recording manifest probe failed: {exc}")
+            return None
         if manifest is None:
             session.errors.append("Recording manifest has no valid segments")
             return None

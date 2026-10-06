@@ -194,6 +194,15 @@ async def test_booted_selector_rejects_ambiguous_or_missing_devices(simulator, b
 
 
 @pytest.mark.asyncio
+async def test_booted_selector_tolerates_mixed_case_and_whitespace(simulator):
+    """The reserved 'booted' token normalizes before comparison."""
+    simulator.driver._device_id = "  BoOtEd  "
+    await simulator.driver.connect()
+    assert simulator.driver.device_id == IOS_A
+    await simulator.driver.disconnect()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("requested, available", [(WATCH, True), (IOS_A, False)])
 async def test_explicit_selection_rejects_non_ios_and_unavailable_devices(
     simulator, requested, available
@@ -925,3 +934,24 @@ async def test_workspace_must_be_existing_project_directory(simulator, tmp_path)
     driver = XcodeSimulatorDriver(workspace_path=workspace)
     await driver.connect()
     await driver.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_simulator_names_reject_instead_of_first_matching(simulator):
+    """Two same-named sims must not silently bind — pin the UDID instead."""
+    simulator.driver._device_id = "Office iPhone"
+    simulator.inventory["devices"]["com.apple.CoreSimulator.SimRuntime.iOS-27-0"] = [
+        device(IOS_A) | {"name": "Office iPhone"},
+        device(IOS_B, state="Shutdown") | {"name": "Office iPhone"},
+    ]
+    with pytest.raises(ValueError, match="UDID"):
+        await simulator.driver.connect()
+    simulator.native.start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exact_simulator_name_resolves_to_its_udid(simulator):
+    simulator.driver._device_id = "iPhone"
+    await simulator.driver.connect()
+    assert simulator.driver.device_id == IOS_A
+    await simulator.driver.disconnect()

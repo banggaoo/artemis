@@ -556,8 +556,10 @@ def _resolve_coordinates(coord: Any, width: int, height: int) -> tuple[int, int]
         if 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0:
             px = int(round(x * width))
             py = int(round(y * height))
-        elif 0 <= x <= 1000 and 0 <= y <= 1000 and (
-            width > 1000 or height > 1000 or x > width or y > height
+        elif (
+            0 <= x <= 1000
+            and 0 <= y <= 1000
+            and (width > 1000 or height > 1000 or x > width or y > height)
         ):
             # Normalized 0-1000 space — also on small (logical-size) iOS
             # screenshots where the values exceed the pixel bounds anyway.

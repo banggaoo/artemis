@@ -475,6 +475,59 @@ async def _device_smoke_test(
     return await smoke_test_device(device_serial, platform=platform)
 
 
+def _ios_requested_device(
+    ios_result: ProbeResult | None, requested_device: str | None
+) -> dict[str, Any] | None:
+    """Canonical iOS selection from probe metadata, or None when ambiguous.
+
+    Mirrors the driver/pool contract: UDID compare is case-insensitive, names
+    match exactly, exactly one match is required, and physical hardware is
+    never picked implicitly. Returns the selected entry as
+    ``{serial, name, state, is_emulator}``.
+    """
+    metadata = ios_result.metadata if ios_result else {}
+    usable_sims = [
+        d
+        for d in (metadata.get("simulators") or [])
+        if d.get("udid") and d.get("state") in ("Booted", "Shutdown")
+    ]
+    physical = [d for d in (metadata.get("connected_physical_devices") or []) if d.get("udid")]
+    booted = [d for d in usable_sims if d.get("state") == "Booted"]
+
+    def _entry(device: dict[str, Any], *, is_emulator: bool) -> dict[str, Any]:
+        state = device.get("state") or ""
+        return {
+            "serial": str(device.get("udid")),
+            "name": device.get("name"),
+            "state": ("device" if not is_emulator or state == "Booted" else state or "unknown"),
+            "is_emulator": is_emulator,
+        }
+
+    if requested_device:
+        if requested_device.strip().lower() == "booted":
+            return _entry(booted[0], is_emulator=True) if len(booted) == 1 else None
+        needle = requested_device.lower()
+        matches = [
+            (d, True)
+            for d in usable_sims
+            if str(d.get("udid")).lower() == needle or d.get("name") == requested_device
+        ]
+        matches += [
+            (d, False)
+            for d in physical
+            if str(d.get("udid")).lower() == needle or d.get("name") == requested_device
+        ]
+        if len(matches) != 1:
+            return None
+        device, is_emulator = matches[0]
+        return _entry(device, is_emulator=is_emulator)
+    if len(booted) == 1:
+        return _entry(booted[0], is_emulator=True)
+    if len(usable_sims) == 1:
+        return _entry(usable_sims[0], is_emulator=True)
+    return None
+
+
 async def _run_device_probe(
     adb_result: ProbeResult | None,
     requested_device: str | None,
@@ -482,29 +535,25 @@ async def _run_device_probe(
     platform: str = "android",
 ) -> dict[str, Any]:
     if platform == "ios":
-        simulators = (ios_result.metadata.get("simulators") if ios_result else None) or []
-        physical = (
-            ios_result.metadata.get("connected_physical_devices") if ios_result else None
-        ) or []
-        ready_udids = [str(d.get("udid")) for d in simulators if d.get("udid")] + [
-            str(d.get("udid")) for d in physical if d.get("udid")
-        ]
-        if requested_device and requested_device not in ready_udids:
+        selected = _ios_requested_device(ios_result, requested_device)
+        if selected is None:
+            if requested_device:
+                return _probe_unavailable(
+                    requested_device,
+                    f"requested iOS device '{requested_device}' does not resolve to exactly "
+                    "one usable iOS device; pass the simulator or paired physical device "
+                    "UDID listed in the ios_simulators check facts",
+                )
             return _probe_unavailable(
-                requested_device,
-                f"requested iOS device '{requested_device}' is not available "
-                "(simulators plus paired+connected physical devices); nothing to probe",
+                None,
+                "no single unambiguous iOS device is available; pass device_serial with an "
+                "explicit simulator or paired physical device UDID",
             )
-        if not ready_udids:
-            return _probe_unavailable(None, "no available iOS device found; nothing to probe")
-        # Auto-pick only a lone simulator — never silently choose hardware.
-        sim_udids = [str(d.get("udid")) for d in simulators if d.get("udid")]
-        serial = requested_device or (sim_udids[0] if len(sim_udids) == 1 else None)
         try:
-            return await _device_smoke_test(serial, platform="ios")
+            return await _device_smoke_test(selected["serial"], platform="ios")
         except Exception as exc:
             return _probe_unavailable(
-                serial, f"iOS smoke test raised {exc.__class__.__name__}: {exc}"
+                selected["serial"], f"iOS smoke test raised {exc.__class__.__name__}: {exc}"
             )
 
     devices = (adb_result.metadata.get("devices") if adb_result else None) or []
@@ -1054,14 +1103,7 @@ def _requested_device_ready(
         ios_result = _find(results, "ios_simulators")
         if ios_result is None:
             return False
-        simulators = ios_result.metadata.get("simulators") or []
-        if any(
-            d.get("udid") == requested_device and d.get("state") in ("Booted", "Shutdown")
-            for d in simulators
-        ):
-            return True
-        physical = ios_result.metadata.get("connected_physical_devices") or []
-        return any(d.get("udid") == requested_device for d in physical)
+        return _ios_requested_device(ios_result, requested_device) is not None
     adb_result = _find(results, "android_adb")
     if adb_result is None:
         return False
@@ -1301,9 +1343,24 @@ async def mobile_diagnose(
         accessibility_helper=accessibility_helper,
         platform=platform_name,
     )
-    device = _compact_device(report)
-    if device is not None and accessibility_helper is not None:
-        device["accessibility_helper"] = accessibility_helper
+    if platform_name == "ios":
+        # The response device is the iOS target diagnose would smoke/probe,
+        # not the Android active_device from the readiness report.
+        selected_ios = _ios_requested_device(_find(results, "ios_simulators"), requested_device)
+        device = (
+            {
+                "serial": selected_ios["serial"],
+                "model": selected_ios["name"],
+                "platform": "ios",
+                "is_emulator": selected_ios["is_emulator"],
+            }
+            if selected_ios
+            else None
+        )
+    else:
+        device = _compact_device(report)
+        if device is not None and accessibility_helper is not None:
+            device["accessibility_helper"] = accessibility_helper
     env_file = host.metadata.get("env_file")
     return {
         "verdict": verdict,

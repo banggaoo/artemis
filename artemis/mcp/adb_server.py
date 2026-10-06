@@ -48,6 +48,11 @@ from artemis.drivers.ios.discovery import BOOTED_SIMULATOR_ID
 from artemis.runtime.adb_endpoint import normalize_device_platform
 from third_party.mobile_use.utils.app_launch_utils import launch_app_with_retries
 
+# Placeholder iOS screen metrics for the lazy context — the driver replaces
+# them with the real display size when it connects.
+_LAZY_IOS_PLACEHOLDER_WIDTH = 1206
+_LAZY_IOS_PLACEHOLDER_HEIGHT = 2622
+
 
 def configure_stdio_mode() -> None:
     """Applies process-wide settings required when serving MCP over stdio.
@@ -128,22 +133,25 @@ def _get_controller(device_serial: str | None = None, target_platform: str | Non
     the native session opens lazily on first use.
     """
     global _GLOBAL_CONTROLLER, _CONTROLLERS
-    target_serial = (
-        device_serial or os.environ.get("ARTEMIS_DEVICE_ID") or os.environ.get("ADB_DEVICE_SERIAL")
-    )
-    if normalize_device_platform(target_platform, strict=False) == "ios":
-        cache_key = f"ios:{target_serial or 'booted'}"
+    is_ios_target = normalize_device_platform(target_platform, strict=False) == "ios"
+    # ADB_DEVICE_SERIAL is Android-only and must never leak into an iOS target.
+    target_serial = device_serial or os.environ.get("ARTEMIS_DEVICE_ID")
+    if not is_ios_target:
+        target_serial = target_serial or os.environ.get("ADB_DEVICE_SERIAL")
+    if is_ios_target:
+        cache_key = f"ios:{target_serial or BOOTED_SIMULATOR_ID}"
         if cache_key in _CONTROLLERS:
             return _CONTROLLERS[cache_key]
-        logger.info("Initializing lazy iOS simulator controller...")
+        logger.info("Initializing lazy iOS device controller...")
         ctx = ArtemisContext(
             trace_id="mcp-session",
             device=DeviceContext(
                 host_platform=platform.os_type.name,
                 mobile_platform=DevicePlatform.IOS,
                 device_id=target_serial or BOOTED_SIMULATOR_ID,
-                device_width=1206,
-                device_height=2622,
+                # Placeholder until the driver reports real screen metrics.
+                device_width=_LAZY_IOS_PLACEHOLDER_WIDTH,
+                device_height=_LAZY_IOS_PLACEHOLDER_HEIGHT,
             ),
         )
         controller = UnifiedMobileController(ctx=ctx)

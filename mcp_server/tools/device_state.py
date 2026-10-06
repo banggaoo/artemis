@@ -14,11 +14,14 @@
 
 """MCP Tool: mobile_get_device_state."""
 
+import asyncio
 import base64
 import os
 
 from mcp_server.base import mcp
 from artemis.mcp.adb_server import _get_controller
+from artemis.runtime.adb_endpoint import normalize_device_platform
+from artemis.runtime.ios_observation import observe_ios_controller
 from mcp_server.utils import env_utils
 from artemis.utils.ocr_xml_fusion import (
     fuse_ocr_with_xml,
@@ -55,23 +58,31 @@ async def mobile_get_device_state(
           device UDID (simulator or paired physical device); omit it to use the single booted simulator.
     """
     try:
-        controller = _get_controller(
-            device_serial=device_serial,
-            **({"target_platform": platform} if platform else {}),
-        )
+        # Strict at the public boundary: a misspelled platform must never fall
+        # through to the Android controller. None/empty stays Android.
+        canonical_platform = normalize_device_platform(platform)
+    except ValueError as e:
+        return f"Error: Failed to initialize/lock device controller: {e}"
+    try:
+        if canonical_platform == "ios":
+            # iOS resolution enumerates simctl/devicectl synchronously; offload
+            # the blocking factory so the MCP loop stays responsive.
+            controller = await asyncio.to_thread(
+                _get_controller, device_serial=device_serial, target_platform="ios"
+            )
+        else:
+            controller = _get_controller(device_serial=device_serial)
         is_ios = str(getattr(controller.ctx.device, "mobile_platform", "android")).lower() == "ios"
     except Exception as e:
         return f"Error: Failed to initialize/lock device controller: {e}"
 
     try:
         if is_ios:
-            # The native Xcode session opens lazily; connect before observing.
-            await controller._driver.connect()
-        device_data = await controller.get_screen_data()
-        if is_ios:
-            # Real capture dims supersede the provisional ctx placeholders.
-            controller.ctx.device.device_width = device_data.width
-            controller.ctx.device.device_height = device_data.height
+            # Owns the whole one-shot lifecycle — device lease, native connect,
+            # capture, disconnect, release — all cancellation-safe.
+            device_data = await observe_ios_controller(controller)
+        else:
+            device_data = await controller.get_screen_data()
         device_width = controller.ctx.device.device_width
         device_height = controller.ctx.device.device_height
         latest_screenshot_b64 = device_data.base64

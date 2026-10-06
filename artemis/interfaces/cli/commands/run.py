@@ -350,9 +350,7 @@ def run_command(
 
     if platform == DevicePlatform.IOS:
         if os.environ.get("ARTEMIS_CLOUD_MODE") == "1":
-            raise typer.BadParameter(
-                "iOS support is local only; cloud mode targets Android."
-            )
+            raise typer.BadParameter("iOS support is local only; cloud mode targets Android.")
         if locked_app_package:
             raise typer.BadParameter("--locked-app is unavailable for iOS tasks.")
     ensure_video_recording_available(with_video_recording_tools)

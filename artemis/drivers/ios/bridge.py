@@ -222,7 +222,7 @@ class XcodeBridge:
         except Exception as exc:
             # Owner failures already propagate to requesters via futures; a
             # close() must never mask the error its caller is handling.
-            logger.debug("Xcode bridge owner exited with an error: %s", exc)
+            logger.debug(f"Xcode bridge owner exited with an error: {exc}")
         if self._ready is not None and self._ready.done() and not self._ready.cancelled():
             self._ready.exception()  # consume an initialization error on cancellation
         self.tools.clear()

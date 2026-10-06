@@ -138,6 +138,23 @@ endpoint on the CoreDevice tunnel address and `127.0.0.1:8100` (for
   `xcodebuild test-without-building` (the canonical WDA session — a bare
   runner app launch does not start the HTTP server)
 
+Endpoint ownership limits: an explicitly configured or forwarded WDA
+endpoint (`ARTEMIS_IOS_WDA_URL`/`ARTEMIS_IOS_WDA_HOST`) must belong to the
+selected physical device. Before opening a session, Artemis reads WDA's
+sessionless `GET /wda/device/info` and refuses to connect when it reports a
+simulator or a device name different from the selected device — the name
+corroborates the selection but is not a cryptographic proof of unique-device
+identity (WDA's `uuid` is `identifierForVendor`, not the device UDID). Artemis
+also refuses to replace a WDA session that belongs to another client, since
+WDA's `POST /session` unconditionally kills the active session; close the
+existing session first.
+
+Protocol details verified against WebDriverAgent 16.14.0 (commit `d177824`,
+checked 2026-10-07):
+[FBSessionCommands.m](https://github.com/appium/WebDriverAgent/blob/d177824/WebDriverAgentLib/Commands/FBSessionCommands.m),
+[FBResponsePayload.m](https://github.com/appium/WebDriverAgent/blob/d177824/WebDriverAgentLib/Routing/FBResponsePayload.m),
+[FBCustomCommands.m](https://github.com/appium/WebDriverAgent/blob/d177824/WebDriverAgentLib/Commands/FBCustomCommands.m).
+
 Simulator bridging note: `xcrun mcpbridge` is spawned with a minimal
 environment; `DEVELOPER_DIR` and `MCP_XCODE_PID` are forwarded when set so a
 specific Xcode toolchain can be pinned.
@@ -219,17 +236,38 @@ The generic builder also accepts
 imported from `artemis.context`. Supplying only a `device_serial` without an iOS
 configuration retains the existing Android selection behavior.
 
+The dependency-free remote client submits iOS tasks to an iOS-capable host —
+the remote host needs macOS, Xcode, and (for hardware) WDA set up as above;
+`ios_workspace` is an optional host-side path, not resolved locally:
+
+```python
+from artemis_client import ArtemisClient
+
+client = ArtemisClient(
+    base_url="http://mac-host:8000",
+    device_serial="<UDID>",
+    platform="ios",
+    # optional: ios_workspace="/abs/host/path/MyApp.xcworkspace",
+)
+result = await client.run("Open Settings and inspect the General page")
+```
+
+iOS submissions first check `GET /api/v1/capabilities` and refuse to POST
+when the host does not advertise `platform.ios` — upgrade the host instead
+of silently running on Android.
+
 ## Daemon, web console, and batch submission
 
 Without `--standalone`, `artemis run --platform ios` forwards
 `platform`/`ios_workspace`/`device_serial` to the running Artemis Daemon, which
-queues the task against the simulator under the shared `ios` lock scope and
-spawns the worker with `--platform ios` — no ADB endpoint or Android readiness
+queues the task against the selected iOS device under the shared `ios`
+lock scope and spawns the worker with `--platform ios` — no ADB endpoint or Android readiness
 probe is involved. `artemis batch` accepts the same `--platform`,
 `--device-serial`, and `--ios-workspace` flags for goal lists.
 
-The Admin Console `/api/run` accepts `platform: "ios"`, a simulator UDID in
-`device_serial`, and an optional `ios_workspace`; `/api/devices` lists Android
+The Admin Console `/api/run` accepts `platform: "ios"`, an iOS device UDID
+(simulator or paired physical hardware) in `device_serial`, and an optional
+`ios_workspace`; `/api/devices` lists Android
 devices and iOS devices (simulators and paired physical hardware) together,
 each tagged with its `platform`. The live screen view
 (`/api/stream/device-live`) streams frames captured with `simctl io
@@ -277,7 +315,7 @@ instead of acquiring a second one.
 | Tap, long press, and swipe | Native synthesized touch events | WDA W3C pointer actions |
 | Text entry | Native keyboard synthesis with `clear_exist=false` | WDA `/wda/keys`, `clear_exist=false` |
 | Enter, Home, Power, volume, and app switcher | Native keyboard and button synthesis | WDA `/wda/keys` (Enter), `/wda/homescreen`, and `/wda/pressButton` |
-| App install, launch, and terminate | `simctl` with simulator `.app` bundles | `devicectl` with signed `.app`/`.ipa`; terminate uses the launch PID or a live process scan |
+| App install, launch, and terminate | `simctl` with simulator `.app` bundles | `devicectl` with signed `.app`/`.ipa`; terminate re-verifies the running executable against the installed app URL (a cached launch PID is only a hint — recycled PIDs are never trusted) |
 | Screen recording | `simctl io recordVideo` (VFR H.264) | `devicectl` screenshot polling assembled to timestamped MP4 |
 
 The native hierarchy is normalized into the element tree used by Artemis's

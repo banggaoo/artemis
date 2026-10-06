@@ -25,6 +25,7 @@ or an enumeration error, mirroring the Android pool's admission contract.
 from __future__ import annotations
 
 from artemis.drivers.ios.discovery import (
+    BOOTED_SIMULATOR_ID,
     is_physical_ios,
     list_core_devices,
     list_core_devices_sync,
@@ -71,32 +72,48 @@ def _owner_fields(owner) -> dict:
     }
 
 
-def _match_status(
-    devices: list[DeviceStatus], requested_serial: str
-) -> DeviceStatus | None:
-    """Find the status matching a requested UDID or device name."""
+def _match_statuses(devices: list[DeviceStatus], requested_serial: str) -> list[DeviceStatus]:
+    """All statuses matching a requested UDID or device name."""
     needle = str(requested_serial).lower()
-    return next(
-        (
-            d
-            for d in devices
-            if d.serial.lower() == needle or (d.model or "") == requested_serial
-        ),
-        None,
+    return [d for d in devices if d.serial.lower() == needle or (d.model or "") == requested_serial]
+
+
+def _match_or_reject(
+    devices: list[DeviceStatus], requested_serial: str
+) -> tuple[DeviceStatus | None, str | None]:
+    """Return (match, None), (None, ambiguity rejection), or (None, None)."""
+    matches = _match_statuses(devices, requested_serial)
+    if len(matches) > 1:
+        serials = sorted(d.serial for d in matches)
+        return None, (
+            f"{len(matches)} iOS devices match '{requested_serial}' "
+            f"({', '.join(serials)}); pass the device UDID instead."
+        )
+    return (matches[0] if matches else None), None
+
+
+def _booted_rejection(raw: list[dict] | None, requested_serial: str) -> str | None:
+    """``booted`` needs exactly one booted simulator to resolve safely."""
+    if str(requested_serial).strip().lower() != BOOTED_SIMULATOR_ID:
+        return None
+    if raw is None:
+        # Enumeration cannot answer: fail open to the driver's own check.
+        return None
+    booted = [d for d in raw if d.get("state") == "Booted"]
+    if len(booted) == 1:
+        return None
+    return (
+        f"'{BOOTED_SIMULATOR_ID}' requires exactly one booted iOS simulator "
+        f"({len(booted)} found); pass an explicit simulator UDID instead."
     )
 
 
 def _state_rejection(match: DeviceStatus, requested_serial: str) -> str | None:
     """The shared explicit-target state check for both validator variants."""
-    acceptable = (
-        ACCEPTABLE_STATES if match.is_emulator else PHYSICAL_ACCEPTABLE_STATES
-    )
+    acceptable = ACCEPTABLE_STATES if match.is_emulator else PHYSICAL_ACCEPTABLE_STATES
     if match.state not in acceptable:
         kind = "simulator" if match.is_emulator else "physical device"
-        return (
-            f"iOS {kind} '{requested_serial}' is in state '{match.state}' "
-            "and cannot be used."
-        )
+        return f"iOS {kind} '{requested_serial}' is in state '{match.state}' and cannot be used."
     return None
 
 
@@ -189,10 +206,14 @@ class IosDevicePool:
         core = await list_core_devices()
         if raw is None and core is None:
             return None
-        devices = self._build_statuses(raw or []) + self._build_physical_statuses(
-            core or []
-        )
-        match = _match_status(devices, requested_serial)
+        if str(requested_serial).strip().lower() == BOOTED_SIMULATOR_ID:
+            # The documented selector: accepted by exactly one booted
+            # simulator, rejected otherwise, fail-open without enumeration.
+            return _booted_rejection(raw, requested_serial)
+        devices = self._build_statuses(raw or []) + self._build_physical_statuses(core or [])
+        match, ambiguity = _match_or_reject(devices, requested_serial)
+        if ambiguity is not None:
+            return ambiguity
         if match is None:
             # A failed enumeration cannot prove the serial is absent —
             # defer to the driver's own resolution rather than reject.
@@ -214,10 +235,12 @@ class IosDevicePool:
         core = list_core_devices_sync()
         if raw is None and core is None:
             return None
-        devices = self._build_statuses(raw or []) + self._build_physical_statuses(
-            core or []
-        )
-        match = _match_status(devices, requested_serial)
+        if str(requested_serial).strip().lower() == BOOTED_SIMULATOR_ID:
+            return _booted_rejection(raw, requested_serial)
+        devices = self._build_statuses(raw or []) + self._build_physical_statuses(core or [])
+        match, ambiguity = _match_or_reject(devices, requested_serial)
+        if ambiguity is not None:
+            return ambiguity
         if match is None:
             # An enumeration that could not answer must not reject the serial.
             if raw is None or core is None or not devices:
@@ -240,6 +263,19 @@ class IosDevicePool:
         target "booted".
         """
         if preferred_serial:
+            if str(preferred_serial).strip().lower() != BOOTED_SIMULATOR_ID:
+                return preferred_serial
+            # "booted" is a documented selector: pin it to the unique booted
+            # simulator when enumeration can answer. Zero/multiple booted sims
+            # keep the literal so the driver's resolution reports the
+            # explicit-UDID guidance; a failed enumeration fails open the same
+            # way. Physical hardware is still never auto-selected.
+            booted_devices = await self.try_list_devices_async()
+            if booted_devices is None:
+                return preferred_serial
+            booted_only = [d for d in booted_devices if d.is_emulator and d.state == "device"]
+            if len(booted_only) == 1:
+                return booted_only[0].serial
             return preferred_serial
         devices = await self.try_list_devices_async() or []
         simulators = [d for d in devices if d.is_emulator]

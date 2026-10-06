@@ -41,15 +41,16 @@ def ios_driver_class(device_id: str | None) -> type[BaseDeviceDriver]:
     from artemis.drivers.ios.discovery import BOOTED_SIMULATOR_ID
     from artemis.drivers.ios.xcode_driver import XcodeSimulatorDriver
 
-    if device_id and device_id != BOOTED_SIMULATOR_ID:
+    if device_id and device_id.strip().lower() != BOOTED_SIMULATOR_ID:
         from artemis.drivers.ios.discovery import (
+            device_matches_identifier,
             find_physical_ios_device_sync,
             list_ios_simulators_sync,
         )
 
         simulators = list_ios_simulators_sync()
         if simulators is None or not any(
-            device.get("udid", "").lower() == device_id.lower() for device in simulators
+            device_matches_identifier(device, device_id) for device in simulators
         ):
             if find_physical_ios_device_sync(device_id) is not None:
                 from artemis.drivers.ios.physical_driver import PhysicalIosDriver
@@ -63,9 +64,7 @@ def _create_ios_driver(ctx: "ArtemisContext") -> BaseDeviceDriver:
     if os.environ.get("ARTEMIS_CLOUD_MODE") == "1":
         raise ValueError("iOS support is local only; cloud mode targets Android.")
     config = getattr(ctx, "agent_config", None)
-    workspace_path = (
-        getattr(config, "ios_workspace_path", None) if config is not None else None
-    )
+    workspace_path = getattr(config, "ios_workspace_path", None) if config is not None else None
     driver_class = ios_driver_class(ctx.device.device_id)
     return driver_class(
         device_id=ctx.device.device_id,

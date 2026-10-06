@@ -225,15 +225,14 @@ class TaskQueueService:
     @staticmethod
     def _task_target(task_item: dict[str, Any]) -> AdbTarget | IosTarget:
         serial = str(task_item.get("device_serial") or "") or None
+        if normalize_device_platform(task_item.get("platform"), strict=False) == "ios":
+            # iOS targets never read a stale/malformed Android endpoint blob.
+            return IosTarget(serial=serial)
         endpoint_data = task_item.get("adb_endpoint")
         endpoint = (
-            AdbEndpoint.from_mapping(endpoint_data)
-            if isinstance(endpoint_data, dict)
-            else None
+            AdbEndpoint.from_mapping(endpoint_data) if isinstance(endpoint_data, dict) else None
         )
-        return target_for_platform(
-            task_item.get("platform"), serial=serial, endpoint=endpoint
-        )
+        return target_for_platform(task_item.get("platform"), serial=serial, endpoint=endpoint)
 
     @classmethod
     def _broadcast_event(cls, event_type: str, data: Any):
@@ -927,6 +926,8 @@ class TaskQueueService:
         device_serial: str | None,
         endpoint: AdbEndpoint,
         now: float,
+        *,
+        platform: str = "android",
     ) -> dict[str, Any] | None:
         """Return the short-circuit response for a duplicate submission, if any."""
         # 1. Deduplication by session_id: if session_id is already running or queued, do not re-enqueue
@@ -965,8 +966,14 @@ class TaskQueueService:
                     if isinstance(item, dict)
                     and item.get("status") == "pending"
                     and item.get("goal") == first_goal
+                    and normalize_device_platform(item.get("platform"), strict=False) == platform
                     and (not device_serial or item.get("device_serial") == device_serial)
-                    and item.get("adb_endpoint", {}).get("identity") == endpoint.identity
+                    # iOS items carry no ADB endpoint snapshot; matching the
+                    # platform + serial is the whole identity there.
+                    and (
+                        platform == "ios"
+                        or (item.get("adb_endpoint") or {}).get("identity") == endpoint.identity
+                    )
                     and (now - float(item.get("created_at", 0))) < 1.0
                 ),
                 None,
@@ -991,9 +998,9 @@ class TaskQueueService:
         # the task can proceed and fail downstream with a clear no-device error.
         if device_serial:
             try:
-                rejection = await device_pool_for(
-                    platform
-                ).validate_explicit_serial_async(device_serial)
+                rejection = await device_pool_for(platform).validate_explicit_serial_async(
+                    device_serial
+                )
             except Exception:
                 rejection = None
             if rejection:
@@ -1101,7 +1108,7 @@ class TaskQueueService:
         endpoint = current_adb_endpoint()
 
         duplicate_response = cls._find_duplicate_submission(
-            goals, session_id, device_serial, endpoint, now
+            goals, session_id, device_serial, endpoint, now, platform=platform
         )
         if duplicate_response is not None:
             return duplicate_response

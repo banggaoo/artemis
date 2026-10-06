@@ -30,6 +30,7 @@ from artemis.drivers.ios.bridge import XcodeApprovalRequiredError, XcodeBridge
 from artemis.drivers.ios.discovery import (
     clear_ios_simulator_cache,
     BOOTED_SIMULATOR_ID,
+    device_matches_identifier,
     parse_simctl_devices,
     parse_xcode_version,
     plist_to_json,
@@ -131,7 +132,7 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
         await self._require_ios_host()
         devices = json.loads(await run_xcrun("simctl", "list", "devices", "--json"))
         available = parse_simctl_devices(devices)
-        if self._device_id == BOOTED_SIMULATOR_ID:
+        if self._device_id.strip().lower() == BOOTED_SIMULATOR_ID:
             candidates = [device for device in available if device.get("state") == "Booted"]
             if len(candidates) != 1:
                 raise ValueError(
@@ -139,11 +140,15 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
                 )
         else:
             candidates = [
-                device
-                for device in available
-                if device.get("udid", "").lower() == self._device_id.lower()
+                device for device in available if device_matches_identifier(device, self._device_id)
             ]
-            if len(candidates) != 1:
+            if len(candidates) > 1:
+                udids = sorted(str(d.get("udid") or "?") for d in candidates)
+                raise ValueError(
+                    f"{len(candidates)} iOS simulators match {self._device_id!r} "
+                    f"({', '.join(udids)}); use the simulator UDID instead."
+                )
+            if not candidates:
                 raise ValueError(f"Unavailable iOS simulator UDID: {self._device_id}")
         self._device_id = candidates[0]["udid"]
         return candidates[0]
@@ -274,7 +279,7 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
         return await self._bridge.call("DeviceInteractionSynthesize", arguments)
 
     def _require_connected(self) -> None:
-        if not self._session_key or self._device_id == BOOTED_SIMULATOR_ID:
+        if not self._session_key or self._device_id.strip().lower() == BOOTED_SIMULATOR_ID:
             raise RuntimeError("Connect the iOS simulator driver before interacting.")
 
     async def _capture(self) -> ScreenData:

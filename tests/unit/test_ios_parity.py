@@ -934,3 +934,166 @@ def test_ios_press_key_vocabulary_passes_the_operator_gate():
 
     ios_supported = {"enter", "home", "power", "volume_up", "volume_down", "app_switch"}
     assert ios_supported <= {key.lower() for key in SUPPORTED_PRESS_KEYS}
+
+
+# --------------------------------------------------------------------------- #
+# lazy MCP controller selection
+# --------------------------------------------------------------------------- #
+
+
+def test_lazy_mcp_ios_controller_uses_ios_context_and_isolated_cache(monkeypatch):
+    """The lazy MCP path builds an iOS DeviceContext without a native session."""
+    from types import SimpleNamespace
+
+    from artemis.context import DevicePlatform
+    from artemis.mcp import adb_server
+
+    captured = {}
+
+    def fake_controller(ctx):
+        captured["ctx"] = ctx
+        return SimpleNamespace(ctx=ctx)
+
+    monkeypatch.setattr(adb_server, "_CONTROLLERS", {})
+    monkeypatch.setattr(adb_server, "_GLOBAL_CONTROLLER", None)
+    monkeypatch.setattr(adb_server, "UnifiedMobileController", fake_controller)
+    monkeypatch.delenv("ARTEMIS_DEVICE_ID", raising=False)
+    monkeypatch.delenv("ADB_DEVICE_SERIAL", raising=False)
+
+    controller = adb_server._get_controller(target_platform="ios")
+    assert captured["ctx"].device.mobile_platform == DevicePlatform.IOS
+    assert captured["ctx"].device.device_id == "booted"
+    assert adb_server._CONTROLLERS == {"ios:booted": controller}
+
+    again = adb_server._get_controller(target_platform="ios")
+    assert again is controller
+
+    # iOS lookups never populate the Android global slot or un-namespaced keys.
+    assert adb_server._GLOBAL_CONTROLLER is None
+    assert all(key.startswith("ios:") for key in adb_server._CONTROLLERS)
+
+
+def test_lazy_mcp_ios_controller_never_reads_adb_device_serial(monkeypatch):
+    """ADB_DEVICE_SERIAL is Android-only: it must not seed an iOS target."""
+    from types import SimpleNamespace
+
+    from artemis.context import DevicePlatform
+    from artemis.mcp import adb_server
+
+    captured = {}
+
+    def fake_controller(ctx):
+        captured["ctx"] = ctx
+        return SimpleNamespace(ctx=ctx)
+
+    monkeypatch.setattr(adb_server, "_CONTROLLERS", {})
+    monkeypatch.setattr(adb_server, "_GLOBAL_CONTROLLER", None)
+    monkeypatch.setattr(adb_server, "UnifiedMobileController", fake_controller)
+    monkeypatch.delenv("ARTEMIS_DEVICE_ID", raising=False)
+    monkeypatch.setenv("ADB_DEVICE_SERIAL", "android-only")
+
+    controller = adb_server._get_controller(target_platform="ios")
+    assert captured["ctx"].device.mobile_platform == DevicePlatform.IOS
+    assert captured["ctx"].device.device_id == "booted"
+    assert set(adb_server._CONTROLLERS) == {"ios:booted"}
+    assert adb_server._GLOBAL_CONTROLLER is None
+
+
+# --------------------------------------------------------------------------- #
+# iOS pool: "booted" selector and name ambiguity
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_ios_pool_booted_selector_pins_the_unique_booted_sim(monkeypatch):
+    pool = _pool_with_devices(monkeypatch)
+    assert await pool.select_device_async(preferred_serial="booted") == "AAAA-1111"
+    assert await pool.validate_explicit_serial_async("booted") is None
+    assert pool.validate_explicit_serial("booted") is None
+
+
+@pytest.mark.asyncio
+async def test_ios_pool_booted_selector_tolerates_case_and_whitespace(monkeypatch):
+    """' Booted ' / 'BOOTED' normalize to the reserved selector, not a name."""
+    pool = _pool_with_devices(monkeypatch)
+    assert await pool.select_device_async(preferred_serial=" Booted ") == "AAAA-1111"
+    assert await pool.validate_explicit_serial_async(" BOOTED ") is None
+    assert pool.validate_explicit_serial("Booted") is None
+
+
+@pytest.mark.asyncio
+async def test_ios_pool_booted_selector_fails_open_on_ambiguity(monkeypatch):
+    """Zero or multiple booted sims keep the literal so the driver's guidance fires."""
+    two_booted = [dict(SIM_LIST[0]), {**SIM_LIST[1], "state": "Booted"}]
+    pool = _pool_with_devices(monkeypatch, two_booted)
+    assert await pool.select_device_async(preferred_serial="booted") == "booted"
+    rejection = await pool.validate_explicit_serial_async("booted")
+    assert rejection is not None and "exactly one booted" in rejection
+    assert "UDID" in rejection
+
+    no_booted = [{**SIM_LIST[0], "state": "Shutdown"}, dict(SIM_LIST[1])]
+    pool = _pool_with_devices(monkeypatch, no_booted)
+    assert await pool.select_device_async(preferred_serial="booted") == "booted"
+    rejection = await pool.validate_explicit_serial_async("booted")
+    assert rejection is not None and "0 found" in rejection
+
+
+@pytest.mark.asyncio
+async def test_ios_pool_booted_selector_fails_open_on_enumeration_error(monkeypatch):
+    pool = IosDevicePool()
+    import importlib
+
+    module = importlib.import_module("artemis.runtime.ios_device_pool")
+    monkeypatch.setattr(module, "list_ios_simulators", AsyncMock(return_value=None))
+    monkeypatch.setattr(module, "list_core_devices", AsyncMock(return_value=None))
+    assert await pool.select_device_async(preferred_serial="booted") == "booted"
+    assert await pool.validate_explicit_serial_async("booted") is None
+
+
+def test_ios_pool_rejects_duplicate_device_names(monkeypatch):
+    """Two usable devices sharing a name must be rejected, not first-matched."""
+    twins = [
+        {**SIM_LIST[0], "name": "Office iPhone"},
+        {**SIM_LIST[1], "name": "Office iPhone", "state": "Booted"},
+    ]
+    pool = _pool_with_devices(monkeypatch, twins)
+    rejection = pool.validate_explicit_serial("Office iPhone")
+    assert rejection is not None and "UDID" in rejection
+    # UDID pins resolve fine.
+    assert pool.validate_explicit_serial("AAAA-1111") is None
+
+
+# --------------------------------------------------------------------------- #
+# Admin capabilities endpoint (thin-SDK iOS wire contract)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_admin_capabilities_endpoint_is_static_and_advertises_ios(monkeypatch):
+    """GET /api/v1/capabilities advertises 'platform.ios' without probing."""
+    import importlib
+
+    tasks_router = importlib.import_module("apps.admin_console.routers.tasks")
+    pool_module = importlib.import_module("artemis.runtime.ios_device_pool")
+    monkeypatch.setattr(
+        pool_module,
+        "list_core_devices",
+        AsyncMock(side_effect=AssertionError("device discovery must not run")),
+    )
+    monkeypatch.setattr(
+        pool_module,
+        "list_ios_simulators",
+        AsyncMock(side_effect=AssertionError("device discovery must not run")),
+    )
+
+    response = await tasks_router.get_capabilities()
+
+    assert response["api_version"] == "1"
+    assert "platform.ios" in response["features"]
+    assert {
+        "tasks.submit",
+        "tasks.get",
+        "tasks.stop",
+        "devices.list",
+        "system.readiness",
+    }.issubset(response["features"])

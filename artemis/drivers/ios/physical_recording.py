@@ -35,6 +35,7 @@ from artemis.config.paths import get_temp_dir
 from artemis.drivers.ios.discovery import devicectl_screenshot, reap_process
 from artemis.drivers.ios.recording import (
     DEFAULT_MAX_DURATION_SECONDS,
+    SEGMENT_PROBE_TIMEOUT_SECONDS,
     IosRecordingSession,
 )
 from artemis.utils.video import get_ffmpeg_path, probe_video_segment, write_recording_manifest
@@ -68,7 +69,17 @@ async def _run_ffmpeg(arguments: list[str]) -> tuple[int, bytes]:
     except TimeoutError:
         await reap_process(process)
         return -1, b"ffmpeg timed out"
-    return process.returncode, stderr
+    except asyncio.CancelledError:
+        await reap_process(process)
+        # Drop only our own in-flight .part output before propagating.
+        part = Path(str(arguments[-1]))
+        if part.suffix == ".mp4" and ".part" in part.name:
+            part.unlink(missing_ok=True)
+        raise
+    rc = process.returncode
+    if rc is None:
+        raise RuntimeError("ffmpeg completed without an exit code")
+    return rc, stderr
 
 
 class IosPhysicalRecordingSession(IosRecordingSession):
@@ -105,9 +116,7 @@ class PhysicalIosRecorder:
         assert session.frames_dir is not None
         session.frame_index += 1
         path = session.frames_dir / f"frame_{session.frame_index:06d}.png"
-        await devicectl_screenshot(
-            self._device_id, path, timeout=CAPTURE_TIMEOUT_SECONDS
-        )
+        await devicectl_screenshot(self._device_id, path, timeout=CAPTURE_TIMEOUT_SECONDS)
         captured_at = time.monotonic()
         if not path.exists() or path.stat().st_size == 0:
             raise RuntimeError("devicectl produced no screenshot frame")
@@ -171,9 +180,7 @@ class PhysicalIosRecorder:
         deadline = time.monotonic() + CAPTURE_TIMEOUT_SECONDS * 2
         while session.anchor_monotonic is None:
             if time.monotonic() > deadline:
-                raise RuntimeError(
-                    "Timed out waiting for the first devicectl screenshot frame."
-                )
+                raise RuntimeError("Timed out waiting for the first devicectl screenshot frame.")
             if not session.is_active:
                 raise RuntimeError(
                     session.errors[-1]
@@ -206,23 +213,31 @@ class PhysicalIosRecorder:
         session.segment_index += 1
         return record
 
+    @staticmethod
+    def _ffconcat_file_line(path: Path) -> str:
+        """Quote a frame path for ffconcat: ' inside a quoted name -> '\\''."""
+        escaped = path.as_posix().replace("'", "'\\''")
+        return f"file '{escaped}'"
+
     def _write_concat(self, session: IosPhysicalRecordingSession, record: dict[str, Any]) -> Path:
         """Write an ffconcat list preserving real capture timestamps."""
         frames = record["frames"]
         end_monotonic = record["end"] + (session.anchor_monotonic or 0.0)
         lines = ["ffconcat version 1.0"]
         for index, frame in enumerate(frames):
-            lines.append(f"file '{Path(frame['path']).as_posix()}'")
+            lines.append(self._ffconcat_file_line(Path(frame["path"])))
             following = frames[index + 1]["at"] if index + 1 < len(frames) else end_monotonic
             lines.append(f"duration {max(0.001, following - frame['at']):.3f}")
         # The concat demuxer ignores the final frame's duration unless the file
         # line repeats, so list the last frame twice to keep its tail visible.
-        lines.append(f"file '{Path(frames[-1]['path']).as_posix()}'")
+        lines.append(self._ffconcat_file_line(Path(frames[-1]["path"])))
         concat_path = Path(frames[0]["path"]).parent / "frames.txt"
         concat_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return concat_path
 
-    async def _convert_record(self, session: IosPhysicalRecordingSession, record: dict[str, Any]) -> None:
+    async def _convert_record(
+        self, session: IosPhysicalRecordingSession, record: dict[str, Any]
+    ) -> None:
         output = Path(record["output_path"])
         width = max(2, int(record["width"] or 1080)) // 2 * 2
         height = max(2, int(record["height"] or 1920)) // 2 * 2
@@ -258,7 +273,9 @@ class PhysicalIosRecorder:
                     str(temporary),
                 ]
             )
-            metadata = await probe_video_segment(temporary)
+            metadata = await probe_video_segment(
+                temporary, timeout_seconds=SEGMENT_PROBE_TIMEOUT_SECONDS
+            )
             valid = (
                 returncode == 0
                 and temporary.exists()
@@ -275,6 +292,11 @@ class PhysicalIosRecorder:
                 f"Physical iOS recording finalization failed (code {returncode}): "
                 f"{stderr.decode(errors='replace')[-2000:]}"
             )
+        except TimeoutError as exc:
+            # A bounded probe that expires records a failure — never report a
+            # segment whose metadata could not be verified as converted.
+            record["conversion_error"] = f"metadata probe timed out: {exc}"
+            logger.error(f"Physical iOS recording probe timed out: {exc}")
         except OSError as exc:
             record["conversion_error"] = str(exc)
             logger.error(f"Physical iOS recording finalization failed: {exc}")
@@ -283,9 +305,7 @@ class PhysicalIosRecorder:
                 temporary.unlink()
         except OSError:
             pass
-        session.errors.append(
-            f"Segment {record['output_path']} failed finalization; frames kept"
-        )
+        session.errors.append(f"Segment {record['output_path']} failed finalization; frames kept")
 
     async def _roll(
         self, session: IosPhysicalRecordingSession, end_monotonic: float, reason: str
@@ -300,8 +320,11 @@ class PhysicalIosRecorder:
             )
         if session.is_active:
             await self._start_segment(session)
+            frames_dir = session.frames_dir
+            if frames_dir is None:
+                raise RuntimeError("Physical iOS recording roll found no frame directory.")
             for frame in leftover:
-                target = session.frames_dir / Path(frame["path"]).name
+                target = frames_dir / Path(frame["path"]).name
                 Path(frame["path"]).rename(target)
                 frame["path"] = target
             session.frames = leftover
@@ -345,15 +368,11 @@ class PhysicalIosRecorder:
     ) -> IosPhysicalRecordingSession:
         async with self._lock:
             if self._session is not None and self._session.is_active:
-                raise RuntimeError(
-                    f"iOS recording is already active on {self._device_id}"
-                )
+                raise RuntimeError(f"iOS recording is already active on {self._device_id}")
             output = (
                 Path(output_dir)
                 if output_dir is not None
-                else Path(
-                    tempfile.mkdtemp(prefix="ios_recording_", dir=get_temp_dir("recordings"))
-                )
+                else Path(tempfile.mkdtemp(prefix="ios_recording_", dir=get_temp_dir("recordings")))
             )
             output.mkdir(parents=True, exist_ok=True)
             self._output_dir = output
@@ -370,18 +389,22 @@ class PhysicalIosRecorder:
             session.poll_task = asyncio.create_task(self._poll_loop(session))
         # The first-frame wait must run outside the lock: the poll loop takes
         # the same lock to append captured frames.
+        completed = False
         try:
             await self._poll_first_frame(session)
-        except BaseException:
-            session.is_active = False
-            if session.poll_task and not session.poll_task.done():
-                session.poll_task.cancel()
-            if session.poll_task is not None:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await session.poll_task
-            raise
-        session.watchdog_task = asyncio.create_task(self._watchdog(session))
-        return session
+            session.watchdog_task = asyncio.create_task(self._watchdog(session))
+            completed = True
+            return session
+        finally:
+            if not completed:
+                session.is_active = False
+                if session.poll_task and not session.poll_task.done():
+                    session.poll_task.cancel()
+                if session.poll_task is not None:
+                    with contextlib.suppress(
+                        asyncio.CancelledError, OSError, ValueError, RuntimeError, TimeoutError
+                    ):
+                        await session.poll_task
 
     async def seal(self, through_time: float | None = None) -> None:
         """Seal the current segment so its final MP4 can be read safely."""
@@ -439,7 +462,16 @@ class PhysicalIosRecorder:
             if record.get("conversion_done") and Path(record["output_path"]).exists()
         }
         output_dir = mp4_paths[0].parent
-        manifest = await write_recording_manifest(output_dir, mp4_paths, offsets)
+        try:
+            manifest = await write_recording_manifest(
+                output_dir,
+                mp4_paths,
+                offsets,
+                probe_timeout_seconds=SEGMENT_PROBE_TIMEOUT_SECONDS,
+            )
+        except (OSError, TimeoutError) as exc:
+            session.errors.append(f"Recording manifest probe failed: {exc}")
+            return None
         if manifest is None:
             session.errors.append("Recording manifest has no valid segments")
             return None

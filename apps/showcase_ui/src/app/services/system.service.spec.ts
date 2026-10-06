@@ -278,6 +278,198 @@ describe('SystemService readiness polling', () => {
     expect(service.selectedIosDevice()).toBeNull();
   });
 
+  const iosProbeWith = (metadata: any) => ({
+    id: 'ios_simulators',
+    category: 'device',
+    title: 'iOS Devices',
+    status: 'pass',
+    is_blocker: false,
+    summary: 'iOS ready',
+    description: '',
+    metadata,
+    actions: []
+  });
+
+  const envProbe = (id: string, status = 'pass') => ({
+    id,
+    category: 'runtime',
+    title: id,
+    status,
+    is_blocker: true,
+    summary: status,
+    description: '',
+    metadata: {},
+    actions: []
+  });
+
+  it('merges paired physical iOS devices alongside simulators', () => {
+    service.fetchReadiness().subscribe();
+    http.expectOne('/api/system/readiness').flush({
+      ...report(90),
+      probes: [
+        iosProbeWith({
+          xcode_27_or_newer: true,
+          simulators: [
+            {
+              udid: 'SIM-1',
+              name: 'iPhone 18 Pro',
+              state: 'Booted',
+              runtime: 'com.apple.CoreSimulator.SimRuntime.iOS-27-0',
+              isAvailable: true
+            }
+          ],
+          connected_physical_devices: [
+            {
+              udid: 'PHYS-1',
+              name: 'Office iPhone',
+              os_version: '27.1',
+              product_type: 'iPhone17,2'
+            },
+            { name: 'No UDID — skipped', os_version: '27.0' }
+          ]
+        })
+      ]
+    });
+
+    const devices = service.connectedDevices();
+    const physical = devices.find(d => d.serial === 'PHYS-1');
+    expect(devices.filter(d => d.platform === 'ios').length).toBe(2);
+    expect(physical?.platform).toBe('ios');
+    expect(physical?.is_emulator).toBeFalse();
+    expect(physical?.state).toBe('device');
+    expect(physical?.product).toBe('iOS 27.1');
+    expect(physical?.android_version).toBeNull();
+  });
+
+  it('selects a physical iOS device by serial and posts its platform', () => {
+    service.fetchReadiness().subscribe();
+    http.expectOne('/api/system/readiness').flush({
+      ...report(91),
+      probes: [
+        iosProbeWith({
+          xcode_27_or_newer: true,
+          connected_physical_devices: [
+            { udid: 'PHYS-9', name: 'Office iPhone', os_version: '27.0' }
+          ]
+        })
+      ]
+    });
+
+    service.selectDevice('PHYS-9', 'ios').subscribe();
+    const request = http.expectOne('/api/system/devices/select');
+    expect(request.request.body).toEqual({ serial: 'PHYS-9', platform: 'ios' });
+    request.flush({ status: 'success', selected_serial: 'PHYS-9', platform: 'ios' });
+
+    expect(service.selectedIosDevice()?.serial).toBe('PHYS-9');
+    expect(service.selectedIosDevice()?.is_emulator).toBeFalse();
+    expect(service.isDeviceReady()).toBeTrue();
+  });
+
+  it('reverts the optimistic iOS selection when the server rejects it', () => {
+    service.fetchReadiness().subscribe();
+    http.expectOne('/api/system/readiness').flush({
+      ...report(92),
+      probes: [
+        iosProbeWith({
+          xcode_27_or_newer: true,
+          simulators: [
+            {
+              udid: 'SIM-2',
+              name: 'iPhone 18 Pro',
+              state: 'Booted',
+              runtime: 'r',
+              isAvailable: true
+            }
+          ]
+        })
+      ]
+    });
+
+    service.selectDevice('SIM-2', 'ios').subscribe({ error: () => {} });
+    expect(service.selectedIosDevice()?.serial).toBe('SIM-2'); // optimistic
+    http
+      .expectOne('/api/system/devices/select')
+      .flush('boom', { status: 500, statusText: 'Internal Server Error' });
+    expect(service.selectedIosDevice()).toBeNull();
+  });
+
+  it('gates iOS readiness on macOS + Xcode 27, not the ADB toolchain', () => {
+    service.fetchReadiness().subscribe();
+    http.expectOne('/api/system/readiness').flush({
+      ...report(93),
+      os_type: 'darwin',
+      probes: [
+        envProbe('python_runtime'),
+        envProbe('system_config'),
+        { ...envProbe('android_adb', 'fail'), metadata: { installed: false } },
+        iosProbeWith({
+          xcode_27_or_newer: true,
+          simulators: [
+            { udid: 'SIM-3', name: 'Sim', state: 'Booted', runtime: 'r', isAvailable: true }
+          ]
+        })
+      ]
+    });
+    expect(service.isEnvironmentReady()).toBeFalse(); // no iOS selection yet
+
+    service.selectDevice('SIM-3', 'ios').subscribe();
+    http.expectOne('/api/system/devices/select').flush({ status: 'success' });
+
+    expect(service.isEnvironmentReady()).toBeTrue();
+  });
+
+  it('keeps an iOS selection not-ready when Xcode is too old', () => {
+    service.fetchReadiness().subscribe();
+    http.expectOne('/api/system/readiness').flush({
+      ...report(94),
+      os_type: 'darwin',
+      probes: [
+        envProbe('python_runtime'),
+        envProbe('system_config'),
+        iosProbeWith({
+          xcode_27_or_newer: false,
+          simulators: [
+            { udid: 'SIM-4', name: 'Sim', state: 'Booted', runtime: 'r', isAvailable: true }
+          ]
+        })
+      ]
+    });
+
+    service.selectDevice('SIM-4', 'ios').subscribe();
+    http.expectOne('/api/system/devices/select').flush({ status: 'success' });
+
+    expect(service.isEnvironmentReady()).toBeFalse();
+  });
+
+  it('restores ADB gates when an Android device is selected', () => {
+    service.fetchReadiness().subscribe();
+    http.expectOne('/api/system/readiness').flush({
+      ...report(95),
+      os_type: 'darwin',
+      probes: [
+        envProbe('python_runtime'),
+        envProbe('system_config'),
+        { ...envProbe('android_adb', 'fail'), metadata: { installed: false } },
+        { ...envProbe('toolchain'), is_blocker: false },
+        iosProbeWith({
+          xcode_27_or_newer: true,
+          simulators: [
+            { udid: 'SIM-5', name: 'Sim', state: 'Booted', runtime: 'r', isAvailable: true }
+          ]
+        })
+      ]
+    });
+
+    service.selectDevice('SIM-5', 'ios').subscribe();
+    http.expectOne('/api/system/devices/select').flush({ status: 'success' });
+    expect(service.isEnvironmentReady()).toBeTrue();
+
+    service.selectDevice('emulator-5554', 'android').subscribe();
+    http.expectOne('/api/system/devices/select').flush({ status: 'success' });
+    expect(service.selectedIosDevice()).toBeNull();
+    expect(service.isEnvironmentReady()).toBeFalse();
+  });
+
   it('restores the standard local ADB server explicitly', () => {
     service.useLocalAdbServer(true).subscribe();
 

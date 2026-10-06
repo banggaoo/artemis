@@ -95,7 +95,13 @@ class IosDeviceProbe(BaseProbe):
             "simulators": simulators or [],
             "physical_device_count": len(physical),
             "connected_physical_devices": [
-                {"udid": d.get("udid"), "name": d.get("name")} for d in connected
+                {
+                    "udid": d.get("udid"),
+                    "name": d.get("name"),
+                    "os_version": d.get("os_version"),
+                    "product_type": d.get("product_type"),
+                }
+                for d in connected
             ],
         }
 

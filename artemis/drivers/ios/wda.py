@@ -106,6 +106,15 @@ class WdaClient:
             if isinstance(value, dict) and value.get("error"):
                 message = value.get("message") or value["error"]
                 raise RuntimeError(f"WebDriverAgent {method} {path} failed: {message}")
+            # WDA reports the live session in the outer /status envelope, not
+            # inside value — surface it so a foreign session is detectable.
+            if (
+                path == "/status"
+                and isinstance(value, dict)
+                and isinstance(payload_out.get("sessionId"), str)
+                and payload_out["sessionId"]
+            ):
+                value["sessionId"] = payload_out["sessionId"]
             return value
         return payload_out
 
@@ -116,9 +125,22 @@ class WdaClient:
         payload: dict[str, Any] | None = None,
         timeout: float | None = None,
     ) -> Any:
-        return await asyncio.to_thread(
-            self._sync_request, method, path, payload, timeout or self._timeout
+        request_task = asyncio.create_task(
+            asyncio.to_thread(self._sync_request, method, path, payload, timeout or self._timeout)
         )
+        try:
+            return await asyncio.shield(request_task)
+        except asyncio.CancelledError:
+            # The blocking urllib call keeps running on its thread; drain it
+            # before propagating so a cancelled input cannot still land on the
+            # device after the caller (and its device lease) moved on.
+            try:
+                await request_task
+            except asyncio.CancelledError:
+                raise
+            except (OSError, ValueError, RuntimeError, TimeoutError) as drain_error:
+                logger.debug(f"WDA request drain failed while cancelling: {drain_error}")
+            raise
 
     # --- Session lifecycle ---
 
@@ -128,9 +150,38 @@ class WdaClient:
         except (RuntimeError, WdaUnavailableError, OSError) as error:
             logger.debug(f"WDA status probe failed for {self._base}: {error}")
             return None
-        return value if isinstance(value, dict) else {"value": value}
+        # Reject non-JSON/foreign bodies instead of wrapping them: a proxy or
+        # unrelated service answering on this port is not WebDriverAgent.
+        return value if isinstance(value, dict) else None
 
-    async def open_session(self) -> str:
+    async def device_info(self, timeout: float = 10.0) -> dict[str, Any]:
+        """GET /wda/device/info — available without a session.
+
+        ``uuid`` here is ``identifierForVendor``, not the device UDID, so
+        identity checks must rely on ``name``/``isSimulator`` instead.
+        """
+        value = await self._request("GET", "/wda/device/info", timeout=timeout)
+        if not isinstance(value, dict):
+            raise RuntimeError(
+                f"WebDriverAgent /wda/device/info returned a non-JSON response: {value!r:.300}"
+            )
+        return value
+
+    async def _create_owned_session(self) -> str:
+        """Status preflight, POST /session, and ID assignment as one unit."""
+        if self._session_id:
+            return self._session_id
+        status = await self.status()
+        if status is None:
+            raise WdaUnavailableError(f"WebDriverAgent at {self._base} did not answer /status.")
+        active = status.get("sessionId")
+        if isinstance(active, str) and active:
+            raise RuntimeError(
+                "Refusing to replace the active WebDriverAgent session "
+                f"({active}), which this client does not own — POST /session "
+                "would kill it. Point ARTEMIS_IOS_WDA_URL at a dedicated WDA "
+                "server or close the existing session first."
+            )
         payload = {
             "capabilities": {
                 "alwaysMatch": {"platformName": "iOS"},
@@ -149,6 +200,34 @@ class WdaClient:
             )
         self._session_id = session_id
         return session_id
+
+    async def open_session(self) -> str:
+        """Create a WDA session, refusing to take over a foreign one.
+
+        Cancellation-safe: when the caller is cancelled while creation is in
+        flight, the request is drained and any session it produced is closed
+        before the CancelledError propagates.
+        """
+        create_task = asyncio.ensure_future(self._create_owned_session())
+        try:
+            return await asyncio.shield(create_task)
+        except asyncio.CancelledError:
+            session_id = None
+            try:
+                session_id = await create_task
+            except asyncio.CancelledError:
+                raise
+            except (OSError, ValueError, RuntimeError, TimeoutError) as drain_error:
+                logger.debug(f"WDA session-create drain failed while cancelling: {drain_error}")
+            if session_id:
+                try:
+                    await self.close_session()
+                except (OSError, ValueError, RuntimeError, TimeoutError) as close_error:
+                    # Best-effort teardown of the orphaned session.
+                    logger.debug(
+                        f"WDA session close after cancelled open_session failed: {close_error}"
+                    )
+            raise
 
     async def close_session(self) -> None:
         session_id, self._session_id = self._session_id, None
@@ -246,9 +325,7 @@ class WdaClient:
         """WDA hardware buttons: home, volumeUp, volumeDown, power."""
         session = self._require_session()
         try:
-            await self._request(
-                "POST", f"/session/{session}/wda/pressButton", {"name": name}
-            )
+            await self._request("POST", f"/session/{session}/wda/pressButton", {"name": name})
             return True
         except WdaUnavailableError:
             # The transport died — propagate so callers don't misreport an
@@ -289,17 +366,17 @@ def normalize_wda_url(raw: str) -> str:
                     value = f"[{value}]"
         value = f"http://{value}"
     value = value.rstrip("/")
-    authority = value.split("://", 1)[1]
-    host_port = authority.split("/", 1)[0]
+    scheme, _, remainder = value.partition("://")
+    host_port, _, path = remainder.partition("/")
     # A port is present when ':' follows the host (or the IPv6 ']' bracket).
     has_port = (
-        host_port.rsplit("]", 1)[-1].startswith(":")
-        if "]" in host_port
-        else ":" in host_port
+        host_port.rsplit("]", 1)[-1].startswith(":") if "]" in host_port else ":" in host_port
     )
-    if not has_port:
-        value = f"{value}:{WDA_DEFAULT_PORT}"
-    return value
+    if has_port:
+        return value
+    # The default port belongs to the authority, ahead of any path suffix.
+    suffix = f"/{path}" if path else ""
+    return f"{scheme}://{host_port}:{WDA_DEFAULT_PORT}{suffix}"
 
 
 def wda_url_candidates(
@@ -312,7 +389,11 @@ def wda_url_candidates(
     for raw in (
         env_url if env_url is not None else os.environ.get(WDA_URL_ENV),
         env_host if env_host is not None else os.environ.get(WDA_HOST_ENV),
-        (f"[{tunnel_ip}]:{WDA_DEFAULT_PORT}" if ":" in tunnel_ip else f"{tunnel_ip}:{WDA_DEFAULT_PORT}")
+        (
+            f"[{tunnel_ip}]:{WDA_DEFAULT_PORT}"
+            if ":" in tunnel_ip
+            else f"{tunnel_ip}:{WDA_DEFAULT_PORT}"
+        )
         if tunnel_ip
         else None,
         f"127.0.0.1:{WDA_DEFAULT_PORT}",
@@ -325,9 +406,7 @@ def wda_url_candidates(
     return candidates
 
 
-async def probe_wda(
-    candidates: list[str], timeout: float = 5.0
-) -> WdaClient | None:
+async def probe_wda(candidates: list[str], timeout: float = 5.0) -> WdaClient | None:
     """Return a client bound to the first endpoint that answers ``/status``."""
     for url in candidates:
         client = WdaClient(url)
@@ -357,6 +436,8 @@ def parse_wda_elements(
 
     def visit(entry: dict[str, Any]) -> None:
         rect = entry.get("rect")
+        if not isinstance(rect, dict):
+            rect = {}
         try:
             x = float(rect.get("x") or 0.0)
             y = float(rect.get("y") or 0.0)
