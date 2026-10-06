@@ -232,8 +232,8 @@ def submit_task_to_daemon(
     ``explorer_mode`` ('flash' | 'pro' | 'ultra') are the Pro-profile tuning
     knobs of ``/api/run``; they are forwarded verbatim and ignored by Flash.
 
-    ``platform="ios"`` submits an iOS Simulator task: ``device_serial`` is a
-    simulator UDID and ``ios_workspace`` optionally scopes Xcode approval.
+    ``platform="ios"`` submits an iOS task: ``device_serial`` is a simulator
+    or physical UDID and ``ios_workspace`` optionally scopes Xcode approval.
 
     Returns the response JSON dict if successfully enqueued, or None on error.
     """
@@ -361,7 +361,7 @@ def submit_batch_to_daemon(
 
     ``verification_level`` / ``explorer_mode`` apply to every goal of the batch
     (see :func:`submit_task_to_daemon`). ``platform="ios"`` targets an iOS
-    Simulator; ``device_serial`` is then the simulator UDID.
+    device; ``device_serial`` is then the device UDID.
     """
     url = f"{base_url or f'http://{DEFAULT_DAEMON_HOST}:{DEFAULT_DAEMON_PORT}'}/api/run"
     payload = {

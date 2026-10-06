@@ -10,12 +10,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""iOS Simulator Readiness Probe.
+"""iOS Device Readiness Probe.
 
 Informational only (``is_blocker = False``): iOS support is opt-in per task,
 so a missing Xcode toolchain must never block the Android default path. The
-probe reports whether this host could run an iOS Simulator task today —
-macOS, Xcode 27+, and at least one available simulator.
+probe reports whether this host could run an iOS task today — macOS, Xcode
+27+, and at least one available simulator or paired+connected physical
+device.
 """
 
 import asyncio
@@ -29,6 +30,8 @@ from artemis.core.diagnostics.schema import (
     ProbeStatus,
 )
 from artemis.drivers.ios.discovery import (
+    is_physical_ios,
+    list_core_devices,
     list_ios_simulators,
     run_xcrun,
     simctl_available,
@@ -55,7 +58,7 @@ class IosSimulatorProbe(BaseProbe):
             return ProbeResult(
                 id=self.probe_id,
                 category=self.category,
-                title="iOS Simulator",
+                title="iOS Devices",
                 status=ProbeStatus.SKIPPED,
                 is_blocker=self.is_blocker,
                 summary="Unavailable",
@@ -79,6 +82,14 @@ class IosSimulatorProbe(BaseProbe):
 
         simulators = await list_ios_simulators()
         booted = [d for d in (simulators or []) if d.get("state") == "Booted"]
+        core_devices = await list_core_devices()
+        physical = [d for d in (core_devices or []) if is_physical_ios(d)]
+        connected = [
+            d
+            for d in physical
+            if d.get("pairing_state") == "paired"
+            and d.get("connection_state") == "connected"
+        ]
         metadata = {
             "platform_supported": True,
             "xcode_version": xcode_version,
@@ -86,13 +97,17 @@ class IosSimulatorProbe(BaseProbe):
             "simulator_count": len(simulators or []),
             "booted_udids": [d.get("udid") for d in booted],
             "simulators": simulators or [],
+            "physical_device_count": len(physical),
+            "connected_physical_devices": [
+                {"udid": d.get("udid"), "name": d.get("name")} for d in connected
+            ],
         }
 
         if not xcode_ok:
             return ProbeResult(
                 id=self.probe_id,
                 category=self.category,
-                title="iOS Simulator",
+                title="iOS Devices",
                 status=ProbeStatus.WARN,
                 is_blocker=self.is_blocker,
                 summary="Xcode 27+ Required",
@@ -110,33 +125,40 @@ class IosSimulatorProbe(BaseProbe):
                 ],
             )
 
-        if not simulators:
+        if not simulators and not connected:
             return ProbeResult(
                 id=self.probe_id,
                 category=self.category,
-                title="iOS Simulator",
+                title="iOS Devices",
                 status=ProbeStatus.WARN,
                 is_blocker=self.is_blocker,
-                summary="No Simulators",
+                summary="No Devices",
                 description=(
-                    "Xcode is installed but no available iOS simulators were found. "
-                    "Create one in Xcode > Settings > Platforms or via simctl."
+                    "Xcode is installed but no available iOS simulators or connected "
+                    "physical devices were found. Create a simulator in Xcode > "
+                    "Settings > Platforms, or attach a paired iPhone/iPad."
                 ),
                 metadata=metadata,
             )
 
-        summary = f"{len(booted)} Booted" if booted else f"{len(simulators)} Available"
+        parts = []
+        if booted:
+            parts.append(f"{len(booted)} simulator(s) booted")
+        elif simulators:
+            parts.append(f"{len(simulators)} simulator(s) available")
+        if connected:
+            parts.append(f"{len(connected)} physical device(s) connected")
+        summary = ", ".join(parts)
         return ProbeResult(
             id=self.probe_id,
             category=self.category,
-            title="iOS Simulator",
+            title="iOS Devices",
             status=ProbeStatus.PASS,
             is_blocker=self.is_blocker,
             summary=summary,
             description=(
-                f"Xcode {xcode_version} with {len(simulators)} available iOS "
-                f"simulator(s){' (' + str(len(booted)) + ' booted)' if booted else ''}. "
-                "Submit a task with platform='ios' and a simulator UDID to use them."
+                f"Xcode {xcode_version}: {summary}. "
+                "Submit a task with platform='ios' and a device UDID to use them."
             ),
             metadata=metadata,
         )
