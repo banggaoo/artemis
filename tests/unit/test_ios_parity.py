@@ -866,3 +866,11 @@ async def test_select_device_android_unchanged(monkeypatch):
     assert result["status"] == "success"
     assert result["selected_serial"] == "emulator-5554"
     set_target.assert_called_once_with("emulator-5554")
+
+
+def test_ios_press_key_vocabulary_passes_the_operator_gate():
+    """Every key the iOS guidance advertises must survive the Operator key gate."""
+    from artemis.agents.operator.operator import SUPPORTED_PRESS_KEYS
+
+    ios_supported = {"enter", "home", "power", "volume_up", "volume_down", "app_switch"}
+    assert ios_supported <= {key.lower() for key in SUPPORTED_PRESS_KEYS}

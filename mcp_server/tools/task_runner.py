@@ -267,7 +267,8 @@ def mobile_run_task(
         model: `"Flash"` or `"Pro"` — see model selection above.
         locked_app_package: Optional package name to lock execution to; the
           agent auto-launches it and restricts actions to that app.
-        app_path: Optional local APK path to install before running.
+        app_path: Optional local app path to install before running (APK for
+          Android, a simulator-built `.app` directory for iOS).
         expected_output_desc: Optional, Pro only. If set, a summarization agent
           writes a report to `output.md` in `notes_dir`. Ignored for Flash.
         device_serial: Optional device serial to bind execution to a specific

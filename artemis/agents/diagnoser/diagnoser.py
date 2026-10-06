@@ -114,7 +114,10 @@ class Diagnoser:
             get_submit_answer_tool(self.ctx),
         ]
         if getattr(getattr(self.ctx, "device", None), "mobile_platform", None) == "ios":
-            all_tools = [t for t in all_tools if t.name != "run_adb_command"]
+            # logcat-backed analysis can never succeed on iOS.
+            all_tools = [
+                t for t in all_tools if t.name not in ("run_adb_command", "analyze_logs")
+            ]
         if not self.is_device_online:
             logger.info(
                 "Diagnoser running in OFFLINE environment: stripping adb short"

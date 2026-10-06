@@ -72,7 +72,15 @@ DEFERRING_TOOLS = {
 }
 
 # Bare key names press_key accepts (case-insensitive, optional KEYCODE_ prefix).
-SUPPORTED_PRESS_KEYS = ("ENTER", "BACK", "HOME", "APP_SWITCH")
+SUPPORTED_PRESS_KEYS = (
+    "ENTER",
+    "BACK",
+    "HOME",
+    "APP_SWITCH",
+    "POWER",
+    "VOLUME_UP",
+    "VOLUME_DOWN",
+)
 
 from artemis.agents.operator.prompts import (
     OPERATOR_MAX_TOOL_ITERATIONS,
