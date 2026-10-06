@@ -30,6 +30,7 @@ from artemis.drivers.ios.discovery import (
     list_core_devices_sync,
     list_ios_simulators,
     list_ios_simulators_sync,
+    physical_ios_ready,
 )
 from artemis.runtime.adb_endpoint import IOS_LOCK_SCOPE
 from artemis.runtime.device_lock import DeviceExecutionLock
@@ -46,20 +47,65 @@ ACCEPTABLE_STATES = frozenset({"device", "Shutdown"})
 PHYSICAL_ACCEPTABLE_STATES = frozenset({"device"})
 
 
+def _ios_lock_owners() -> dict:
+    """Active lock owners scoped to iOS, keyed by normalized device id.
+
+    Owner map keys are only scope-prefixed for multi-owner collisions, so
+    match by owner payload: an iOS lock always carries lock_scope="ios",
+    and an Android lock on the same text must never mark a device busy.
+    """
+    return {
+        DeviceExecutionLock._normalize_device_id(o.device_id): o
+        for o in DeviceExecutionLock.get_active_owners().values()
+        if o and getattr(o, "lock_scope", None) == IOS_LOCK_SCOPE
+    }
+
+
+def _owner_fields(owner) -> dict:
+    return {
+        "is_busy": owner is not None,
+        "active_pid": owner.pid if owner else None,
+        "active_task_desc": owner.description if owner else None,
+        "active_session_id": owner.session_id if owner else None,
+        "acquired_at": owner.acquired_at if owner else None,
+    }
+
+
+def _match_status(
+    devices: list[DeviceStatus], requested_serial: str
+) -> DeviceStatus | None:
+    """Find the status matching a requested UDID or device name."""
+    needle = str(requested_serial).lower()
+    return next(
+        (
+            d
+            for d in devices
+            if d.serial.lower() == needle or (d.model or "") == requested_serial
+        ),
+        None,
+    )
+
+
+def _state_rejection(match: DeviceStatus, requested_serial: str) -> str | None:
+    """The shared explicit-target state check for both validator variants."""
+    acceptable = (
+        ACCEPTABLE_STATES if match.is_emulator else PHYSICAL_ACCEPTABLE_STATES
+    )
+    if match.state not in acceptable:
+        kind = "simulator" if match.is_emulator else "physical device"
+        return (
+            f"iOS {kind} '{requested_serial}' is in state '{match.state}' "
+            "and cannot be used."
+        )
+    return None
+
+
 class IosDevicePool:
     """Discovers iOS simulators and physical devices and reports lock state."""
 
     @staticmethod
     def _build_statuses(raw_devices: list[dict]) -> list[DeviceStatus]:
-        active_owners = DeviceExecutionLock.get_active_owners()
-        # Owner map keys are only scope-prefixed for multi-owner collisions, so
-        # match by owner payload: an iOS lock always carries lock_scope="ios",
-        # and an Android lock on the same text must never mark a sim busy.
-        ios_owners = {
-            DeviceExecutionLock._normalize_device_id(o.device_id): o
-            for o in active_owners.values()
-            if o and getattr(o, "lock_scope", None) == IOS_LOCK_SCOPE
-        }
+        ios_owners = _ios_lock_owners()
         devices: list[DeviceStatus] = []
         for device in raw_devices:
             udid = str(device.get("udid") or "")
@@ -79,33 +125,29 @@ class IosDevicePool:
                         "-", " "
                     ),
                     is_emulator=True,
-                    is_busy=owner is not None,
-                    active_pid=owner.pid if owner else None,
-                    active_task_desc=owner.description if owner else None,
-                    active_session_id=owner.session_id if owner else None,
-                    acquired_at=owner.acquired_at if owner else None,
                     platform="ios",
+                    **_owner_fields(owner),
                 )
             )
         return devices
 
     @staticmethod
     def _build_physical_statuses(raw_devices: list[dict]) -> list[DeviceStatus]:
-        """CoreDevice entries -> statuses; reachable devices read as "device"."""
-        active_owners = DeviceExecutionLock.get_active_owners()
-        ios_owners = {
-            DeviceExecutionLock._normalize_device_id(o.device_id): o
-            for o in active_owners.values()
-            if o and getattr(o, "lock_scope", None) == IOS_LOCK_SCOPE
-        }
+        """CoreDevice entries -> statuses; usable devices read as "device"."""
+        ios_owners = _ios_lock_owners()
         devices: list[DeviceStatus] = []
         for device in raw_devices:
             if not is_physical_ios(device):
                 continue
             udid = str(device.get("udid") or "")
-            paired = device.get("pairing_state") == "paired"
-            connected = device.get("connection_state") == "connected"
-            state = "device" if connected and paired else "unpaired" if not paired else "offline"
+            ready = physical_ios_ready(device)
+            state = (
+                "device"
+                if ready
+                else "unpaired"
+                if device.get("pairing_state") != "paired"
+                else "offline"
+            )
             owner = ios_owners.get(DeviceExecutionLock._normalize_device_id(udid))
             devices.append(
                 DeviceStatus(
@@ -114,12 +156,8 @@ class IosDevicePool:
                     model=device.get("name"),
                     product=f"iOS {device.get('os_version') or '?'} physical",
                     is_emulator=False,
-                    is_busy=owner is not None,
-                    active_pid=owner.pid if owner else None,
-                    active_task_desc=owner.description if owner else None,
-                    active_session_id=owner.session_id if owner else None,
-                    acquired_at=owner.acquired_at if owner else None,
                     platform="ios",
+                    **_owner_fields(owner),
                 )
             )
         return devices
@@ -154,15 +192,7 @@ class IosDevicePool:
         devices = self._build_statuses(raw or []) + self._build_physical_statuses(
             core or []
         )
-        needle = str(requested_serial).lower()
-        match = next(
-            (
-                d
-                for d in devices
-                if d.serial.lower() == needle or (d.model or "") == requested_serial
-            ),
-            None,
-        )
+        match = _match_status(devices, requested_serial)
         if match is None:
             # A failed enumeration cannot prove the serial is absent —
             # defer to the driver's own resolution rather than reject.
@@ -172,56 +202,31 @@ class IosDevicePool:
                 f"iOS device '{requested_serial}' is not available. "
                 f"Known devices: {sorted(d.serial for d in devices)}."
             )
-        acceptable = (
-            ACCEPTABLE_STATES if match.is_emulator else PHYSICAL_ACCEPTABLE_STATES
-        )
-        if match.state not in acceptable:
-            kind = "simulator" if match.is_emulator else "physical device"
-            return (
-                f"iOS {kind} '{requested_serial}' is in state '{match.state}' "
-                "and cannot be used."
-            )
-        return None
+        return _state_rejection(match, requested_serial)
 
     def validate_explicit_serial(self, requested_serial: str) -> str | None:
-        """Synchronous validator for non-async admission paths (MCP tools)."""
-        devices = list_ios_simulators_sync()
-        statuses = {d["udid"].lower(): d.get("state") for d in devices or []}
-        needle = str(requested_serial).lower()
-        state = statuses.get(needle)
-        if state is not None:
-            if state != "Booted" and state != "Shutdown":
-                return (
-                    f"iOS simulator '{requested_serial}' is in state '{state}' "
-                    "and cannot be used."
-                )
-            return None
+        """Synchronous validator for non-async admission paths (MCP tools).
+
+        Shares the async validator's matching and state rules so both
+        admission paths accept and reject the same targets.
+        """
+        raw = list_ios_simulators_sync()
         core = list_core_devices_sync()
-        physical = [d for d in core or [] if is_physical_ios(d)]
-        match = next(
-            (
-                d
-                for d in physical
-                if str(d.get("udid") or "").lower() == needle
-                or d.get("name") == requested_serial
-            ),
-            None,
+        if raw is None and core is None:
+            return None
+        devices = self._build_statuses(raw or []) + self._build_physical_statuses(
+            core or []
         )
+        match = _match_status(devices, requested_serial)
         if match is None:
             # An enumeration that could not answer must not reject the serial.
-            if devices is None or core is None:
-                return None
-            if not statuses and not physical:
+            if raw is None or core is None or not devices:
                 return None
             return (
                 f"iOS device '{requested_serial}' is not available. "
-                f"Known devices: {sorted([*statuses, *[d['udid'] for d in physical]])}."
+                f"Known devices: {sorted(d.serial for d in devices)}."
             )
-        if match.get("pairing_state") != "paired":
-            return f"iOS device '{requested_serial}' is not paired with this Mac."
-        if match.get("connection_state") != "connected":
-            return f"iOS device '{requested_serial}' is offline; attach it and retry."
-        return None
+        return _state_rejection(match, requested_serial)
 
     async def select_device_async(self, preferred_serial: str | None = None) -> str | None:
         """Pick a simulator UDID for task execution.

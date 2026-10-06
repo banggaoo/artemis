@@ -38,6 +38,7 @@ from typing import Any
 import urllib.error
 import urllib.request
 
+from artemis.drivers.ios.hierarchy import pixel_element
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -376,20 +377,17 @@ def parse_wda_elements(
                 elif value is not None and str(value):
                     text = str(value)
                 element_type = str(entry.get("type") or "")
-                element: dict[str, Any] = {
-                    "text": text,
-                    "resource_id": name if isinstance(name, str) else "",
-                    "class": element_type.removeprefix(_ELEMENT_TYPE_PREFIX),
-                    "bounds": f"[{left},{top}][{right},{bottom}]",
-                    "parsed_bounds": {
-                        "left": left,
-                        "top": top,
-                        "right": right,
-                        "bottom": bottom,
-                    },
-                    "hit_point": [(left + right) // 2, (top + bottom) // 2],
-                    "visible": bool(entry.get("isVisible", True)),
-                }
+                element = pixel_element(
+                    text=text,
+                    resource_id=name if isinstance(name, str) else "",
+                    class_name=element_type.removeprefix(_ELEMENT_TYPE_PREFIX),
+                    left=left,
+                    top=top,
+                    right=right,
+                    bottom=bottom,
+                )
+                element["hit_point"] = [(left + right) // 2, (top + bottom) // 2]
+                element["visible"] = bool(entry.get("isVisible", True))
                 if value is not None and str(value) != text:
                     element["value"] = str(value)
                 elements.append(element)

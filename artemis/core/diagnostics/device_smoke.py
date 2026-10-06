@@ -56,6 +56,7 @@ import threading
 import time
 from typing import Any, TypeVar
 
+from artemis.runtime.adb_endpoint import normalize_device_platform
 from artemis.runtime.device_lock import DeviceExecutionLock
 from third_party.mobile_use.utils.logger import get_logger
 
@@ -97,7 +98,7 @@ def _uiautomator_fix(serial: str | None) -> list[str]:
 
 
 def _ios_fix_for_error(error: str | None, serial: str | None) -> list[str]:
-    """iOS Simulator repair steps (simctl/Xcode instead of adb/UIAutomator)."""
+    """iOS repair steps (simctl/Xcode for simulators, devicectl/WDA for hardware)."""
     s = serial or "<UDID>"
     text = (error or "").lower()
     if "busy" in text or "another task" in text:
@@ -114,6 +115,20 @@ def _ios_fix_for_error(error: str | None, serial: str | None) -> list[str]:
         return [
             "Install Xcode 27 or later and select it: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer",
         ]
+    if (
+        "webdriveragent" in text
+        or "wda" in text
+        or "physical" in text
+        or "pair" in text
+        or "trust" in text
+        or "devicectl" in text
+        or "developer mode" in text
+    ):
+        return [
+            f"List paired devices: xcrun devicectl list devices; check capture: xcrun devicectl device capture screenshot --device {s} --destination /tmp/ios.png",
+            "Pair the device (plug in, tap Trust), enable Developer Mode under Settings > Privacy & Security, and ensure WebDriverAgent is installed "
+            "(build-for-testing via Xcode, or set ARTEMIS_IOS_WDA_URL to a running server).",
+        ]
     if "simulator" in text or "udid" in text or "boot" in text or "not available" in text:
         return [
             f"List simulators: xcrun simctl list devices; boot one with: xcrun simctl boot {s}",
@@ -127,7 +142,7 @@ def _ios_fix_for_error(error: str | None, serial: str | None) -> list[str]:
 
 def fix_for_error(error: str | None, serial: str | None, platform: str = "android") -> list[str]:
     """Map an error string to concrete repair steps (substring match, case-insensitive)."""
-    if platform.lower() == "ios":
+    if normalize_device_platform(platform, strict=False) == "ios":
         return _ios_fix_for_error(error, serial)
     if not error:
         return []
@@ -297,14 +312,15 @@ async def smoke_test_device(
 ) -> dict[str, Any]:
     """Observe the device exactly like ``mobile_get_device_state`` and report a verdict.
 
-    ``platform="ios"`` exercises the native Xcode 27 simulator path
-    (``simctl`` + mcpbridge session) instead of ADB/UIAutomator.
+    ``platform="ios"`` exercises the native iOS path (``simctl`` + mcpbridge
+    for simulators, ``devicectl`` + WebDriverAgent for physical devices)
+    instead of ADB/UIAutomator.
 
     Never raises. Returns::
 
         {"ok": bool, "serial": str | None, "elapsed_seconds": float,
          "screenshot_bytes": int | None, "element_count": int | None,
-         "hierarchy_backend": "helper" | "uiautomator" | "xcode" | None,
+         "hierarchy_backend": "helper" | "uiautomator" | "xcode" | "wda" | None,
          "error": str | None, "fix": list[str]}
     """
     started = time.monotonic()
@@ -341,7 +357,7 @@ async def smoke_test_device(
             " skipping the screen capture so the running task is not disturbed."
         )
 
-    is_ios = platform.lower() == "ios"
+    is_ios = normalize_device_platform(platform, strict=False) == "ios"
     try:
         from artemis.mcp import adb_server
 
@@ -399,7 +415,11 @@ async def smoke_test_device(
     result["screenshot_bytes"] = _decoded_length(getattr(device_data, "base64", None))
     result["element_count"] = _count_elements(getattr(device_data, "elements", None))
     if is_ios:
-        result["hierarchy_backend"] = "xcode"
+        from artemis.drivers.ios.physical_driver import PhysicalIosDriver
+
+        result["hierarchy_backend"] = (
+            "wda" if isinstance(getattr(controller, "_driver", None), PhysicalIosDriver) else "xcode"
+        )
     else:
         from artemis.clients.screen_client_factory import describe_backend
 

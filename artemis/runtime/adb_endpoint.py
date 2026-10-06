@@ -37,9 +37,63 @@ ADB_ENDPOINT_ID_ENV = "ARTEMIS_ADB_ENDPOINT_ID"
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _SAFE_HOST_PATTERN = re.compile(r"^[A-Za-z0-9._:\-\[\]]+$")
 
+# User-facing platform vocabulary shared by CLI, console, daemon, and MCP.
+SUPPORTED_PLATFORMS: tuple[str, ...] = ("android", "ios")
+DEFAULT_PLATFORM = "android"
+
+
+def normalize_device_platform(
+    value: object,
+    *,
+    default: str = DEFAULT_PLATFORM,
+    strict: bool = True,
+) -> str:
+    """Canonicalize a platform token to ``"android"`` or ``"ios"``.
+
+    Strips whitespace and case-folds. ``strict=True`` (entry points) raises
+    ``ValueError`` on anything else; ``strict=False`` (fail-open internals)
+    falls back to *default*. Surfaces adapt the ``ValueError`` to their own
+    error type (HTTP 400, Typer error, blocked verdict, ...).
+    """
+    text = str(value).strip().lower() if value is not None else ""
+    if not text:
+        return default
+    if text in SUPPORTED_PLATFORMS:
+        return text
+    if strict:
+        raise ValueError(f"Unsupported platform '{value}'. Expected 'android' or 'ios'.")
+    return default
+
 
 class InvalidAdbEndpoint(ValueError):
     """Raised when an ADB server endpoint is malformed."""
+
+
+def device_pool_for(platform: object):
+    """The device pool for a platform token (lazy imports avoid a cycle).
+
+    Both pools expose the same admission surface (``validate_explicit_serial``,
+    ``validate_explicit_serial_async``, ``select_device_async``,
+    ``list_devices_async``).
+    """
+    if normalize_device_platform(platform, strict=False) == "ios":
+        from artemis.runtime.ios_device_pool import ios_device_pool
+
+        return ios_device_pool
+    from artemis.runtime.device_pool import device_pool
+
+    return device_pool
+
+
+def target_for_platform(
+    platform: object,
+    serial: str | None = None,
+    endpoint: AdbEndpoint | None = None,
+) -> AdbTarget | IosTarget:
+    """Build the execution target for a platform; ``lock_scope`` comes with it."""
+    if normalize_device_platform(platform, strict=False) == "ios":
+        return IosTarget(serial=serial)
+    return AdbTarget(endpoint=endpoint or current_adb_endpoint(), serial=serial)
 
 
 @dataclass(frozen=True, slots=True)

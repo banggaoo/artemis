@@ -46,7 +46,7 @@ class IosActuator(AdbActuator):
                 return ActionResult.failure("input_text", error)
         success = await self.controller.type_text(text, clear_existing=clear_exist)
         if not success:
-            return ActionResult.failure("input_text", "Failed to type text on the iOS simulator.")
+            return ActionResult.failure("input_text", "Failed to type text on the iOS device.")
         return ActionResult.success("input_text", f"Typed '{text}'.")
 
     async def press_key(self, key: str) -> ActionResult:

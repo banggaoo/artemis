@@ -20,7 +20,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from artemis.core.diagnostics import readiness_engine
 from artemis.runtime import DeviceExecutionLock, device_pool, ios_device_pool
-from artemis.runtime.adb_endpoint import IOS_LOCK_SCOPE
+from artemis.runtime.adb_endpoint import (
+    IOS_LOCK_SCOPE,
+    device_pool_for,
+    normalize_device_platform,
+)
 
 try:
     from admin_console.core.state import state
@@ -114,8 +118,9 @@ async def run_task(request: RunRequest):
                 "total_queued": len(state.queue_tasks),
             }
 
-    platform = str(request.platform or "android").strip().lower() or "android"
-    if platform not in ("android", "ios"):
+    try:
+        platform = normalize_device_platform(request.platform)
+    except ValueError:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported platform '{request.platform}'. Expected 'android' or 'ios'.",
@@ -134,12 +139,9 @@ async def run_task(request: RunRequest):
     # fail downstream with a clear error instead.
     if request.device_serial:
         try:
-            if platform == "ios":
-                rejection = await ios_device_pool.validate_explicit_serial_async(
-                    request.device_serial
-                )
-            else:
-                rejection = await device_pool.validate_explicit_serial_async(request.device_serial)
+            rejection = await device_pool_for(platform).validate_explicit_serial_async(
+                request.device_serial
+            )
         except Exception:
             rejection = None
         if rejection:

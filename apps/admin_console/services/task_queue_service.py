@@ -52,7 +52,13 @@ from artemis.runtime import (
     request_cancel,
     trace_store,
 )
-from artemis.runtime.adb_endpoint import IOS_LOCK_SCOPE, IosTarget
+from artemis.runtime.adb_endpoint import (
+    IOS_LOCK_SCOPE,
+    IosTarget,
+    device_pool_for,
+    normalize_device_platform,
+    target_for_platform,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -218,16 +224,16 @@ class TaskQueueService:
 
     @staticmethod
     def _task_target(task_item: dict[str, Any]) -> AdbTarget | IosTarget:
-        serial = task_item.get("device_serial")
-        if str(task_item.get("platform") or "android").lower() == "ios":
-            return IosTarget(serial=str(serial) if serial else None)
+        serial = str(task_item.get("device_serial") or "") or None
         endpoint_data = task_item.get("adb_endpoint")
         endpoint = (
             AdbEndpoint.from_mapping(endpoint_data)
             if isinstance(endpoint_data, dict)
-            else current_adb_endpoint()
+            else None
         )
-        return AdbTarget(endpoint=endpoint, serial=str(serial) if serial else None)
+        return target_for_platform(
+            task_item.get("platform"), serial=serial, endpoint=endpoint
+        )
 
     @classmethod
     def _broadcast_event(cls, event_type: str, data: Any):
@@ -985,14 +991,9 @@ class TaskQueueService:
         # the task can proceed and fail downstream with a clear no-device error.
         if device_serial:
             try:
-                if platform == "ios":
-                    from artemis.runtime import ios_device_pool
-
-                    rejection = await ios_device_pool.validate_explicit_serial_async(device_serial)
-                else:
-                    from artemis.runtime import device_pool
-
-                    rejection = await device_pool.validate_explicit_serial_async(device_serial)
+                rejection = await device_pool_for(
+                    platform
+                ).validate_explicit_serial_async(device_serial)
             except Exception:
                 rejection = None
             if rejection:
@@ -1088,7 +1089,7 @@ class TaskQueueService:
         or paired physical UDID, the device lock is scoped under ``ios``, and the worker
         runs with ``--platform ios`` instead of ADB bindings.
         """
-        platform = str(platform or "android").strip().lower() or "android"
+        platform = normalize_device_platform(platform, strict=False)
         verification_level = (
             str(verification_level).strip().lower() or None if verification_level else None
         )
@@ -1112,15 +1113,7 @@ class TaskQueueService:
         single_session_id = session_id if (session_id and len(goals) == 1) else None
         if not device_serial:
             try:
-                if platform == "ios":
-                    from artemis.runtime import ios_device_pool
-
-                    device_serial = await ios_device_pool.select_device_async()
-                else:
-                    # Device enumeration may block on ADB.
-                    from artemis.runtime import device_pool
-
-                    device_serial = await device_pool.select_device_async()
+                device_serial = await device_pool_for(platform).select_device_async()
             except Exception:
                 device_serial = None
         for i, goal in enumerate(goals):

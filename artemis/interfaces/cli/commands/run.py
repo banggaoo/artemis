@@ -23,6 +23,7 @@ from langchain_core.callbacks.base import Callbacks
 from artemis.config import checker_overrides_for_level, settings
 from artemis.context import DevicePlatform
 from artemis.drivers.ios.bridge import XcodeApprovalRequiredError, xcode_approval_guidance
+from artemis.drivers.ios.discovery import BOOTED_SIMULATOR_ID
 from artemis.utils.startup_progress import publish_startup_progress
 from third_party.mobile_use.main import (
     GoalArgument,
@@ -147,7 +148,7 @@ async def execute_task(
 
     target_serial = device_serial
     if platform == DevicePlatform.IOS:
-        target_serial = target_serial or "booted"
+        target_serial = target_serial or BOOTED_SIMULATOR_ID
     else:
         target_serial = (
             target_serial or settings.ADB_DEVICE_SERIAL or os.environ.get("ADB_DEVICE_SERIAL")

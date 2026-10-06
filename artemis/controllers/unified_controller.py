@@ -689,7 +689,7 @@ class UnifiedMobileController(UnifiedMobileControllerBase):
     async def _start_ios_recording(
         self, output_dir: Path | None, max_duration_seconds: int
     ) -> VideoRecordingResult:
-        """Start native simctl capture through the iOS driver."""
+        """Start native capture through the iOS driver (simctl or devicectl)."""
         device_id = self._get_device_id()
         if already_active := recording_already_active(device_id):
             return already_active
@@ -697,7 +697,7 @@ class UnifiedMobileController(UnifiedMobileControllerBase):
         if driver is None:
             return VideoRecordingResult(
                 success=False,
-                message="iOS recording requires the Xcode simulator driver.",
+                message="iOS recording requires the iOS driver.",
             )
         try:
             await driver.start_video_recording(

@@ -148,6 +148,7 @@ class Agent(AgentBase):
         if self._initialized:
             return True
         from artemis.drivers.factory import ios_driver_class
+        from artemis.drivers.ios.discovery import BOOTED_SIMULATOR_ID
 
         publish_startup_progress(
             "device_check", "Checking the iOS device", session_id=self._session_id
@@ -155,15 +156,15 @@ class Agent(AgentBase):
         # The picker runs simctl/devicectl subprocesses — keep them off the
         # event loop so init timeouts and progress stays responsive.
         driver_class = await asyncio.to_thread(
-            ios_driver_class, self._config.device_id or "booted"
+            ios_driver_class, self._config.device_id or BOOTED_SIMULATOR_ID
         )
         driver = driver_class(
-            device_id=self._config.device_id or "booted",
+            device_id=self._config.device_id or BOOTED_SIMULATOR_ID,
             workspace_path=getattr(self._config, "ios_workspace_path", None),
         )
         self._ios_driver = driver
         try:
-            # Resolve the simulator without booting it or opening a native UI
+            # Resolve the device without booting it or opening a native UI
             # session. Mutating setup waits for run_task's execution lease.
             await driver.resolve_device()
         except (OSError, ValueError, RuntimeError, TimeoutError, asyncio.CancelledError):

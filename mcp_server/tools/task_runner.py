@@ -29,13 +29,14 @@ from mcp_server.utils import env_utils
 from artemis.config import ExplorerVersion, checker_overrides_for_level
 from artemis.config.runtime import read_ipc_port
 from artemis.runtime import (
+    IOS_LOCK_SCOPE,
     DeviceExecutionLock,
-    device_pool,
+    IosTarget,
     ensure_daemon_running,
-    ios_device_pool,
     submit_task_to_daemon,
     trace_store,
 )
+from artemis.runtime.adb_endpoint import device_pool_for, normalize_device_platform
 
 # Seconds the spawned runner gets to finish its imports and open its log files
 # before the spawn is declared dead. Normal startup creates stdout.log within a
@@ -155,12 +156,13 @@ def _validate_device_serial(device_serial: str, platform: str = "android") -> di
     try:
         # The shared validators fail open on an indeterminate/empty enumeration:
         # the task proceeds and fails downstream with a clear no-device error.
-        if platform == "ios":
-            detail = ios_device_pool.validate_explicit_serial(device_serial)
-            inspect_hint = "Run `xcrun simctl list devices` (simulators) or `xcrun devicectl list devices` (physical devices)"
-        else:
-            detail = device_pool.validate_explicit_serial(device_serial)
-            inspect_hint = "Run `adb devices -l` to inspect attached hardware"
+        detail = device_pool_for(platform).validate_explicit_serial(device_serial)
+        inspect_hint = (
+            "Run `xcrun simctl list devices` (simulators) or "
+            "`xcrun devicectl list devices` (physical devices)"
+            if platform == "ios"
+            else "Run `adb devices -l` to inspect attached hardware"
+        )
     except Exception:
         return None
     if detail is None:
@@ -296,10 +298,8 @@ def mobile_run_task(
     if model.lower() not in ("flash", "pro"):
         raise ValueError(f"Invalid model '{model}'. Must be either 'Flash' or 'Pro'.")
     canonical_model = "Flash" if model.lower() == "flash" else "Pro"
-    # 0a. Validate and normalize platform: 'android' (ADB) or 'ios' (Xcode Simulator).
-    platform = (platform or "android").strip().lower()
-    if platform not in ("android", "ios"):
-        raise ValueError(f"Invalid platform '{platform}'. Must be 'android' or 'ios'.")
+    # 0a. Validate and normalize platform: 'android' (ADB) or 'ios' (Xcode).
+    platform = normalize_device_platform(platform)
     if platform == "ios" and locked_app_package:
         return {
             "trace_id": None,
@@ -472,7 +472,7 @@ def mobile_run_task(
     if platform == "ios":
         # iOS workers queue under the ios__<UDID> scope so they never collide
         # with an Android device sharing the same textual identifier.
-        reserve_kwargs["lock_scope"] = "ios"
+        reserve_kwargs["lock_scope"] = IOS_LOCK_SCOPE
     queue_ticket = DeviceExecutionLock.reserve(**reserve_kwargs)
 
     # 5. Spawn the background task runner as an independent subprocess
@@ -511,14 +511,14 @@ def mobile_run_task(
         env["ARTEMIS_SESSION_ID"] = trace_id
         env["ARTEMIS_TASK_INGRESS"] = "mcp"
         if platform == "ios":
-            # An iOS worker never touches ADB: a stale serial must not leak in.
-            env.pop("ADB_DEVICE_SERIAL", None)
-        if device_serial:
-            if platform == "ios":
+            # iOS workers run under the ios lock scope; the target scrubs
+            # stale ADB serials so an Android id can never leak in.
+            IosTarget(serial=device_serial).apply_to_environment(env)
+            if device_serial:
                 env["ARTEMIS_DEVICE_ID"] = device_serial
-            else:
-                env["ADB_DEVICE_SERIAL"] = device_serial
-                env["ARTEMIS_DEVICE_ID"] = device_serial
+        elif device_serial:
+            env["ADB_DEVICE_SERIAL"] = device_serial
+            env["ARTEMIS_DEVICE_ID"] = device_serial
         env[DeviceExecutionLock.QUEUE_TICKET_ENV] = queue_ticket
         try:
             ipc_port = read_ipc_port()
@@ -541,7 +541,7 @@ def mobile_run_task(
             "ingress": "mcp",
         }
         if platform == "ios":
-            transfer_kwargs["lock_scope"] = "ios"
+            transfer_kwargs["lock_scope"] = IOS_LOCK_SCOPE
         if device_serial:
             transfer_kwargs["device_id"] = device_serial
 

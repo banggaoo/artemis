@@ -24,6 +24,7 @@ from artemis.config import (
     load_agent_config,
     settings,
 )
+from artemis.drivers.ios.discovery import BOOTED_SIMULATOR_ID
 from artemis.context import DevicePlatform
 from artemis.sdk.types.agent import AgentConfig, ServerConfig
 from artemis.utils.video import detect_video_tools_enabled
@@ -78,13 +79,16 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         """Target a specific Android device by its ADB serial number."""
         return self.for_device(DevicePlatform.ANDROID, device_serial)
 
-    def for_ios_simulator(
-        self, device_id: str = "booted", *, workspace_path: str | Path | None = None
+    def for_ios_device(
+        self, device_id: str = BOOTED_SIMULATOR_ID, *, workspace_path: str | Path | None = None
     ) -> "AgentConfigBuilder":
         """Target an iOS device UDID (simulator or paired physical), or the booted simulator."""
         if workspace_path is not None:
             self.with_ios_workspace(workspace_path)
         return self.for_device(DevicePlatform.IOS, device_id)
+
+    # Backward-compatible alias from when iOS support was simulator-only.
+    for_ios_simulator = for_ios_device
 
     def with_ios_workspace(self, workspace_path: str | Path | None) -> "AgentConfigBuilder":
         """Set an existing Xcode project/workspace for iOS first-run approval."""

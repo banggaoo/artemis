@@ -138,6 +138,10 @@ endpoint on the CoreDevice tunnel address and `127.0.0.1:8100` (for
   `xcodebuild test-without-building` (the canonical WDA session — a bare
   runner app launch does not start the HTTP server)
 
+Simulator bridging note: `xcrun mcpbridge` is spawned with a minimal
+environment; `DEVELOPER_DIR` and `MCP_XCODE_PID` are forwarded when set so a
+specific Xcode toolchain can be pinned.
+
 Differences from simulators:
 
 - The device must already be paired, trusted, and connected; Artemis never
@@ -188,7 +192,7 @@ Configure iOS through the embedded SDK's builder:
 from artemis.sdk import Agent
 from artemis.sdk.builders import AgentConfigBuilder
 
-config = AgentConfigBuilder().for_ios_simulator("<SIMULATOR-UDID>").build()
+config = AgentConfigBuilder().for_ios_device("<SIMULATOR-UDID>").build()
 agent = Agent(config=config)
 ```
 
@@ -198,7 +202,7 @@ existing project or workspace through the builder:
 ```python
 config = (
     AgentConfigBuilder()
-    .for_ios_simulator(
+    .for_ios_device(
         "<SIMULATOR-UDID>",
         workspace_path="/absolute/path/MyApp.xcodeproj",
     )

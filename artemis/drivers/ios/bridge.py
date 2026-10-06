@@ -81,7 +81,7 @@ def xcode_approval_guidance(workspace_path: str | Path | None = None) -> str:
         "grants can require approval again.\n"
         "If Xcode has not recorded a request yet, rerun with "
         "--platform ios --ios-workspace /absolute/path/YourApp.xcodeproj "
-        "(or pass workspace_path to for_ios_simulator())."
+        "(or pass workspace_path to for_ios_device())."
     )
 
 

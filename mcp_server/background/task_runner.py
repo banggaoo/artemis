@@ -42,6 +42,8 @@ except Exception:
     load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 from artemis.runtime import trace_store
+from artemis.drivers.ios.discovery import BOOTED_SIMULATOR_ID
+from artemis.runtime.adb_endpoint import normalize_device_platform
 from mcp_server.notifiers import notify
 from mcp_server.utils import device_utils
 
@@ -156,7 +158,7 @@ async def run_task(
     print("--------------------------------------------------")
 
     agent = None
-    is_ios = platform.lower() == "ios"
+    is_ios = normalize_device_platform(platform, strict=False) == "ios"
     adb_path = None if is_ios else device_utils.resolve_adb_path()
     target_serial = device_serial
 
@@ -176,7 +178,7 @@ async def run_task(
         if is_ios:
             # The iOS driver resolves "booted" against `simctl` at connect
             # time; an explicit UDID was already validated at admission.
-            target_serial = device_serial or "booted"
+            target_serial = device_serial or BOOTED_SIMULATOR_ID
             print(f"✅ Targeting iOS simulator: '{target_serial}'.")
         elif device_serial:
             target_serial = device_serial
@@ -231,7 +233,7 @@ async def run_task(
 
         if is_ios:
             config_builder.for_ios_simulator(
-                device_id=target_serial or "booted",
+                device_id=target_serial or BOOTED_SIMULATOR_ID,
                 workspace_path=ios_workspace,
             )
         elif target_serial:

@@ -603,7 +603,7 @@ def detect_video_tools_enabled(platform: str = "android") -> bool:
     iOS uses native ``xcrun simctl io recordVideo`` capture plus the bundled
     FFmpeg for post-processing; Android requires scrcpy plus FFmpeg.
     """
-    if platform == "ios":
+    if str(platform).strip().lower() == "ios":
         return (
             sys.platform == "darwin" and shutil.which("xcrun") is not None and is_ffmpeg_installed()
         )

@@ -35,6 +35,19 @@ def application_bundle(hierarchy: str) -> str | None:
     return next(iter(bundles)) if len(bundles) == 1 else None
 
 
+def pixel_element(
+    *, text: str, resource_id: str, class_name: str, left: int, top: int, right: int, bottom: int
+) -> dict[str, Any]:
+    """Element dict in the shared Android-shape format used by both iOS parsers."""
+    return {
+        "text": text,
+        "resource_id": resource_id,
+        "class": class_name,
+        "bounds": f"[{left},{top}][{right},{bottom}]",
+        "parsed_bounds": {"left": left, "top": top, "right": right, "bottom": bottom},
+    }
+
+
 def parse_hierarchy(
     hierarchy: str, width: int, height: int
 ) -> tuple[list[dict[str, Any]], tuple[float, float]]:
@@ -101,13 +114,15 @@ def parse_hierarchy(
             text = value_text
         elif placeholder and placeholder.group(1):
             text = placeholder.group(1)
-        element: dict[str, Any] = {
-            "text": text,
-            "resource_id": identifier.group(1) if identifier else "",
-            "class": line.strip().split(",", 1)[0].split(" ", 1)[0],
-            "bounds": f"[{left},{top}][{right},{bottom}]",
-            "parsed_bounds": {"left": left, "top": top, "right": right, "bottom": bottom},
-        }
+        element = pixel_element(
+            text=text,
+            resource_id=identifier.group(1) if identifier else "",
+            class_name=line.strip().split(",", 1)[0].split(" ", 1)[0],
+            left=left,
+            top=top,
+            right=right,
+            bottom=bottom,
+        )
         if hit:
             hx, hy = map(float, hit.groups())
             element["hit_point"] = [round(hx * scale[0]), round(hy * scale[1])]

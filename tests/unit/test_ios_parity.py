@@ -610,22 +610,25 @@ async def test_stream_target_none_without_devices(monkeypatch):
 
 
 def test_mcp_validate_device_serial_ios_uses_ios_pool(monkeypatch):
+    from artemis.runtime import device_pool as adb_pool
+    from artemis.runtime.ios_device_pool import ios_device_pool
     from mcp_server.tools import task_runner
 
     ios_validate = MagicMock(return_value=None)
     adb_validate = MagicMock(return_value="should not be called")
-    monkeypatch.setattr(task_runner.ios_device_pool, "validate_explicit_serial", ios_validate)
-    monkeypatch.setattr(task_runner.device_pool, "validate_explicit_serial", adb_validate)
+    monkeypatch.setattr(ios_device_pool, "validate_explicit_serial", ios_validate)
+    monkeypatch.setattr(adb_pool, "validate_explicit_serial", adb_validate)
     assert task_runner._validate_device_serial("AAAA-1111", "ios") is None
     ios_validate.assert_called_once_with("AAAA-1111")
     adb_validate.assert_not_called()
 
 
 def test_mcp_validate_device_serial_ios_rejection(monkeypatch):
+    from artemis.runtime.ios_device_pool import ios_device_pool
     from mcp_server.tools import task_runner
 
     monkeypatch.setattr(
-        task_runner.ios_device_pool,
+        ios_device_pool,
         "validate_explicit_serial",
         lambda serial: f"iOS simulator '{serial}' is not available.",
     )

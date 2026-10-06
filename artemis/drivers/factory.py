@@ -38,9 +38,10 @@ def ios_driver_class(device_id: str | None) -> type[BaseDeviceDriver]:
     ``PhysicalIosDriver``; simulators, ``booted``, and unknown serials keep
     ``XcodeSimulatorDriver`` so its existing validation and error paths apply.
     """
+    from artemis.drivers.ios.discovery import BOOTED_SIMULATOR_ID
     from artemis.drivers.ios.xcode_driver import XcodeSimulatorDriver
 
-    if device_id and device_id != "booted":
+    if device_id and device_id != BOOTED_SIMULATOR_ID:
         from artemis.drivers.ios.discovery import (
             find_physical_ios_device_sync,
             list_ios_simulators_sync,

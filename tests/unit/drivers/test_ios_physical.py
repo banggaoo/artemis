@@ -507,13 +507,11 @@ async def test_recorder_polls_frames_and_assembles_mp4(tmp_path, monkeypatch):
     """Frames become one timestamped segment through the ffconcat demuxer."""
     ffmpeg_calls = []
 
-    async def fake_xcrun(*arguments, timeout=30.0):
+    async def fake_screenshot(device_id, destination, timeout=30.0):
         # Pace like real devicectl round-trips; an instant fake lets the poll
         # loop flood tmp_path with frames and stalls cleanup for minutes.
         await asyncio.sleep(0.02)
-        destination = Path(arguments[arguments.index("--destination") + 1])
         _png(destination)
-        return b""
 
     async def fake_ffmpeg(arguments):
         ffmpeg_calls.append(arguments)
@@ -529,7 +527,7 @@ async def test_recorder_polls_frames_and_assembles_mp4(tmp_path, monkeypatch):
         manifest.write_text("{}")
         return manifest
 
-    monkeypatch.setattr(physical_recording, "run_xcrun", fake_xcrun)
+    monkeypatch.setattr(physical_recording, "devicectl_screenshot", fake_screenshot)
     monkeypatch.setattr(physical_recording, "_run_ffmpeg", fake_ffmpeg)
     monkeypatch.setattr(physical_recording, "probe_video_segment", fake_probe)
     monkeypatch.setattr(physical_recording, "write_recording_manifest", fake_manifest)
@@ -542,13 +540,11 @@ async def test_recorder_polls_frames_and_assembles_mp4(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_recorder_partitions_frames_at_the_seam(tmp_path, monkeypatch):
-    async def fake_xcrun(*arguments, timeout=30.0):
+    async def fake_screenshot(device_id, destination, timeout=30.0):
         await asyncio.sleep(0.02)
-        destination = Path(arguments[arguments.index("--destination") + 1])
         _png(destination)
-        return b""
 
-    monkeypatch.setattr(physical_recording, "run_xcrun", fake_xcrun)
+    monkeypatch.setattr(physical_recording, "devicectl_screenshot", fake_screenshot)
     recorder = PhysicalIosRecorder(IPHONE_UDID)
     session = await recorder.start(tmp_path)
     anchor = session.anchor_monotonic
@@ -566,11 +562,11 @@ async def test_recorder_partitions_frames_at_the_seam(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_recorder_fails_closed_when_devicectl_never_delivers(tmp_path, monkeypatch):
-    async def fake_xcrun(*arguments, timeout=30.0):
+    async def fake_screenshot(device_id, destination, timeout=30.0):
         await asyncio.sleep(0.01)
         raise RuntimeError("device disconnected")
 
-    monkeypatch.setattr(physical_recording, "run_xcrun", fake_xcrun)
+    monkeypatch.setattr(physical_recording, "devicectl_screenshot", fake_screenshot)
     monkeypatch.setattr(physical_recording, "MAX_CONSECUTIVE_FAILURES", 2)
     recorder = PhysicalIosRecorder(IPHONE_UDID)
     with pytest.raises(RuntimeError):
