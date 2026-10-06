@@ -45,8 +45,11 @@ STARTUP_TIMEOUT_SECONDS = 30.0
 SIGINT_FLUSH_TIMEOUT_SECONDS = 10.0
 TERMINATE_TIMEOUT_SECONDS = 3.0
 PROBES_TIMEOUT_SECONDS = 3.0
+FFMPEG_TIMEOUT_SECONDS = 120.0
 WATCHDOG_INTERVAL_SECONDS = 0.5
 MAX_CONSECUTIVE_FAILURES = 3
+MIN_HEALTHY_SEGMENT_SECONDS = 10.0
+MAX_CONCURRENT_CONVERSIONS = 2
 STDERR_BUFFER_LINES = 200
 
 
@@ -95,12 +98,28 @@ async def probe_display_dimensions(device_id: str) -> tuple[int, int] | None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        stdout, _stderr = await asyncio.wait_for(process.communicate(), PROBES_TIMEOUT_SECONDS)
-    except (OSError, TimeoutError):
+    except OSError:
         return None
+    try:
+        stdout, _stderr = await asyncio.wait_for(process.communicate(), PROBES_TIMEOUT_SECONDS)
+    except TimeoutError:
+        await _reap_probe(process)
+        return None
+    except asyncio.CancelledError:
+        await _reap_probe(process)
+        raise
     if process.returncode != 0:
         return None
     return _parse_display_dimensions(stdout.decode(errors="replace"))
+
+
+async def _reap_probe(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    await process.communicate()
 
 
 async def finalize_mov_to_mp4(
@@ -160,8 +179,21 @@ async def finalize_mov_to_mp4(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _stdout, stderr = await process.communicate()
-        metadata = await probe_video_segment(temporary_path)
+        try:
+            _stdout, stderr = await asyncio.wait_for(
+                process.communicate(), FFMPEG_TIMEOUT_SECONDS
+            )
+            metadata = await asyncio.wait_for(
+                probe_video_segment(temporary_path), PROBES_TIMEOUT_SECONDS * 10
+            )
+        except TimeoutError:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            await process.communicate()
+            raise RuntimeError("iOS recording finalization timed out")
         valid = (
             process.returncode == 0
             and temporary_path.exists()
@@ -178,6 +210,8 @@ async def finalize_mov_to_mp4(
         )
     except OSError as exc:
         logger.error(f"iOS recording finalization failed: {exc}")
+    except RuntimeError as exc:
+        logger.error(f"iOS recording finalization failed: {exc}")
     if temporary_path.exists():
         temporary_path.unlink()
     return False
@@ -193,6 +227,7 @@ class IosScreenRecorder:
         self._lock = asyncio.Lock()
         self._max_duration_seconds = 900
         self._consecutive_failures = 0
+        self._conversion_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CONVERSIONS)
 
     @property
     def session(self) -> IosRecordingSession | None:
@@ -260,12 +295,18 @@ class IosScreenRecorder:
             await asyncio.wait_for(process.wait(), SIGINT_FLUSH_TIMEOUT_SECONDS)
         except (ProcessLookupError, TimeoutError):
             if process.returncode is None:
-                process.terminate()
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    return end_monotonic
                 try:
                     await asyncio.wait_for(process.wait(), TERMINATE_TIMEOUT_SECONDS)
                 except (ProcessLookupError, TimeoutError):
                     if process.returncode is None:
-                        process.kill()
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
                         await process.wait()
         return end_monotonic
 
@@ -344,9 +385,10 @@ class IosScreenRecorder:
         source = Path(record["path"])
         output = Path(record["output_path"])
         span = max(0.001, float(record["end"]) - float(record["start"]))
-        ok = await finalize_mov_to_mp4(
-            source, output, int(record["width"] or 1080), int(record["height"] or 1920), span
-        )
+        async with self._conversion_semaphore:
+            ok = await finalize_mov_to_mp4(
+                source, output, int(record["width"] or 1080), int(record["height"] or 1920), span
+            )
         if ok:
             record["conversion_done"] = True
         else:
@@ -370,7 +412,6 @@ class IosScreenRecorder:
         if session.is_active:
             try:
                 await self._spawn_recorder(session)
-                self._consecutive_failures = 0
                 restarted = True
             except asyncio.CancelledError:
                 raise
@@ -405,8 +446,14 @@ class IosScreenRecorder:
                     )
                     age = time.monotonic() - (session.segment_started_monotonic or time.monotonic())
                     overdue = age >= self._max_duration_seconds
-                    if not crashed and not rotated and not overdue:
+                    if crashed and age < MIN_HEALTHY_SEGMENT_SECONDS:
+                        # A respawn that dies before surviving a healthy interval
+                        # is a crash loop, not recovery — count it even though a
+                        # successful respawn would otherwise reset the counter.
+                        self._consecutive_failures += 1
+                    elif not crashed and age >= MIN_HEALTHY_SEGMENT_SECONDS:
                         self._consecutive_failures = 0
+                    if not crashed and not rotated and not overdue:
                         continue
                     reason = (
                         "recorder exit" if crashed else "rotation" if rotated else "duration limit"
@@ -467,6 +514,11 @@ class IosScreenRecorder:
                 else time.monotonic()
             )
             end_monotonic = min(end_monotonic, time.monotonic())
+            if (
+                session.segment_started_monotonic is not None
+                and end_monotonic <= session.segment_started_monotonic
+            ):
+                return
             await self._roll(session, end_monotonic, "seal")
 
     async def _finalize(self, session: IosRecordingSession) -> Path | None:

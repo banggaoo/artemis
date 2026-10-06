@@ -195,6 +195,10 @@ def batch_command(
         Path | None,
         typer.Option(
             "--ios-workspace",
+            exists=True,
+            dir_okay=True,
+            file_okay=False,
+            resolve_path=True,
             help="Existing Xcode project/workspace to request iOS first-run agent approval.",
         ),
     ] = None,

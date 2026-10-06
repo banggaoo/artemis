@@ -270,11 +270,17 @@ def mobile_run_task(
         app_path: Optional local APK path to install before running.
         expected_output_desc: Optional, Pro only. If set, a summarization agent
           writes a report to `output.md` in `notes_dir`. Ignored for Flash.
-        device_serial: Optional device serial (e.g. "emulator-5554") to bind
-          execution to a specific device; distinct devices run concurrently.
-          If omitted, an available device is selected automatically. When
-          several devices are attached, confirm the target with the user first
-          (`adb devices -l` lists serials and authorization states).
+        device_serial: Optional device serial to bind execution to a specific
+          device; distinct devices run concurrently. For `platform="android"`,
+          an ADB serial (e.g. "emulator-5554"). For `platform="ios"`, a
+          simulator UDID (`xcrun simctl list devices` lists them); omit to
+          auto-select a booted simulator.
+        platform: Optional target platform: `"android"` (default, ADB) or
+          `"ios"` (local Xcode 27 simulator). iOS requires macOS; locked-app
+          mode is not supported on iOS.
+        ios_workspace: Optional Xcode project/workspace path used to request
+          first-run device-interaction approval for iOS runs. Ignored for
+          Android.
         verification_level: Optional, Pro only. Coarse Checker preset: `"off"`
           (no audit; the Operator self-reports), `"final"` (one exit review
           against the goal, the default), `"checkpoints"` (every plan
@@ -504,6 +510,9 @@ def mobile_run_task(
         env = os.environ.copy()
         env["ARTEMIS_SESSION_ID"] = trace_id
         env["ARTEMIS_TASK_INGRESS"] = "mcp"
+        if platform == "ios":
+            # An iOS worker never touches ADB: a stale serial must not leak in.
+            env.pop("ADB_DEVICE_SERIAL", None)
         if device_serial:
             if platform == "ios":
                 env["ARTEMIS_DEVICE_ID"] = device_serial

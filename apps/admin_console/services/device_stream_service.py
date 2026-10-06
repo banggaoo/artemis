@@ -45,6 +45,7 @@ class DeviceStreamService:
         self._last_frame_time: float = 0.0
         self._is_capturing = False
         self._capture_task: asyncio.Task | None = None
+        self._last_target: dict[str, str] | None = None
 
     async def get_stream_target(self) -> dict[str, str] | None:
         """Pick the device the stream should follow right now.
@@ -134,7 +135,16 @@ class DeviceStreamService:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            await proc.communicate()
+            try:
+                await proc.communicate()
+            except asyncio.CancelledError:
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                await proc.communicate()
+                raise
             if proc.returncode == 0 and frame_path.exists():
                 data = frame_path.read_bytes()
                 return data if len(data) > 1000 else None
@@ -149,6 +159,10 @@ class DeviceStreamService:
             try:
                 start_t = time.time()
                 target = await self.get_stream_target()
+                if target != self._last_target:
+                    # Never carry frames across a device/platform switch.
+                    self._latest_frame = None
+                    self._last_target = target
                 frame = None
                 if target is not None:
                     if target["platform"] == "ios":

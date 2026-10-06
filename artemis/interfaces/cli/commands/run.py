@@ -503,7 +503,7 @@ def run_command(
         raise SystemExit(2)
     except Exception as e:
         err_msg = str(e)
-        if "API_KEY" in err_msg or "requires" in err_msg:
+        if "API_KEY" in err_msg or "api key" in err_msg.lower():
             console.print()
             console.print(
                 Panel(

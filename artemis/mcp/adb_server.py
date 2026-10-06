@@ -146,8 +146,6 @@ def _get_controller(device_serial: str | None = None, target_platform: str | Non
         )
         controller = UnifiedMobileController(ctx=ctx)
         _CONTROLLERS[cache_key] = controller
-        if _GLOBAL_CONTROLLER is None:
-            _GLOBAL_CONTROLLER = controller
         return controller
 
     if target_serial and target_serial in _CONTROLLERS:
