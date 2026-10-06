@@ -313,7 +313,7 @@ ARTEMIS supports two execution profiles tailored for different automation requir
 ## Roadmap
 
 - [ ] **Android Studio Integration**: Native IDE plugin and workflow integration to enable in-editor debugging, test recording, and automated device control directly within Android Studio.
-- [ ] **iOS Platform Expansion**: [iOS Simulator support](./docs/ios.md) is available with Xcode 27+ across the CLI, SDK, web console, daemon, MCP, replay, and streaming; physical devices remain planned.
+- [x] **iOS Platform Expansion**: [iOS Simulator support](./docs/ios.md) is available with Xcode 27+ across the CLI, SDK, web console, daemon, MCP, replay, and streaming; physical devices remain planned.
 - [ ] **On-Device Lightweight VLMs**: Local execution with lightweight edge vision models for low-latency, privacy-first automation.
 - [ ] **Real-time Duplex Voice Interaction**: Voice-driven task dispatch with real-time conversational control and interruption handling.
 
