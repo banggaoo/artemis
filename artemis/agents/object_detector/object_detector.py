@@ -35,6 +35,10 @@ _DETECTOR_SEMAPHORE = asyncio.Semaphore(6)
 
 # The detector's output contract: points are [x, y] on a normalized 0-1000
 # grid over the image that was sent (consumers divide by 1000 to get pixels).
+# Items may also carry ``box_2d`` corner pairs in the same declared convention
+# (Gemma 4's trained detection output is [ymin, xmin, ymax, xmax] / 1000, i.e.
+# the default ``yx_1000``); a box is normalized in place to [x1, y1, x2, y2]
+# and synthesizes ``point`` from its center when the item lacks one.
 # Models differ in what they natively emit; ``coordinate_format`` on the
 # resolved endpoint declares the convention so results can be normalized:
 #   axis order  — ``yx`` (Gemini ER style) or ``xy`` (most vision models)
@@ -99,9 +103,10 @@ def _detected_batch_scale(items: list) -> str | None:
         abs(float(c))
         for item in items
         if isinstance(item, dict)
-        and isinstance(item.get("point"), (list, tuple))
-        and len(item["point"]) == 2
-        for c in item["point"]
+        for key in ("point", "box_2d")
+        if isinstance(item.get(key), (list, tuple))
+        and len(item[key]) == (2 if key == "point" else 4)
+        for c in item[key]
         if isinstance(c, (int, float)) and not isinstance(c, bool)
     ]
     if not coords:
@@ -145,6 +150,51 @@ def _normalize_detected_point(
         x, y = x * _PIXEL_GRID, y * _PIXEL_GRID
 
     item["point"] = [x, y]
+
+
+def _normalize_detected_box(
+    item: dict,
+    coordinate_format: str,
+    image_size: tuple[int, int] | None,
+    batch_scale: str | None,
+) -> bool:
+    """Rewrite ``item['box_2d']`` to [x1, y1, x2, y2] on the 0-1000 contract.
+
+    When the item has no usable ``point``, the box center becomes it. Returns
+    True only in that case: a synthesized point is already on the contract
+    grid and must not go through ``_normalize_detected_point`` again.
+    """
+    box = item.get("box_2d")
+    if not (isinstance(box, (list, tuple)) and len(box) == 4):
+        return False
+    try:
+        a, b, c, d = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return False
+
+    x1, y1, x2, y2 = (b, a, d, c) if coordinate_format.startswith("yx") else (a, b, c, d)
+
+    scale = batch_scale or coordinate_format.rsplit("_", 1)[-1]
+    if scale == "px":
+        if image_size:
+            grid_w, grid_h = _qwen_resized_dimensions(*image_size)
+            x1, x2 = x1 * _PIXEL_GRID / grid_w, x2 * _PIXEL_GRID / grid_w
+            y1, y2 = y1 * _PIXEL_GRID / grid_h, y2 * _PIXEL_GRID / grid_h
+    elif scale == "norm":
+        x1, y1, x2, y2 = x1 * _PIXEL_GRID, y1 * _PIXEL_GRID, x2 * _PIXEL_GRID, y2 * _PIXEL_GRID
+
+    item["box_2d"] = [x1, y1, x2, y2]
+
+    point = item.get("point")
+    if isinstance(point, (list, tuple)) and len(point) == 2:
+        try:
+            float(point[0])
+            float(point[1])
+            return False
+        except (TypeError, ValueError):
+            pass
+    item["point"] = [(x1 + x2) / 2, (y1 + y2) / 2]
+    return True
 
 
 async def _detect_single_label(
@@ -289,7 +339,9 @@ async def _run_object_detection(
     batch_scale = _detected_batch_scale(fused_results)
     for item in fused_results:
         if isinstance(item, dict):
-            _normalize_detected_point(item, coordinate_format, image_size, batch_scale)
+            box_derived = _normalize_detected_box(item, coordinate_format, image_size, batch_scale)
+            if not box_derived:
+                _normalize_detected_point(item, coordinate_format, image_size, batch_scale)
 
     detected_labels = set(
         item["label"] for item in fused_results if isinstance(item, dict) and "label" in item
