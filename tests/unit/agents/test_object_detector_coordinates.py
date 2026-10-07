@@ -27,6 +27,7 @@ from artemis.agents.object_detector.object_detector import (
     _detected_batch_scale,
     _endpoint_coordinate_format,
     _image_dimensions,
+    _normalize_detected_box,
     _normalize_detected_point,
     _qwen_resized_dimensions,
 )
@@ -108,6 +109,63 @@ def test_batch_scale_mixed_grid_stays_undeclared():
 
 def test_batch_scale_all_zero_is_undeclared():
     assert _detected_batch_scale([_item(0, 0)]) is None
+
+
+def test_batch_scale_scans_box_2d_coords():
+    boxes = [
+        {"box_2d": [0.1, 0.2, 0.3, 0.4], "label": "a"},
+        {"box_2d": [0.5, 0.6, 0.7, 0.8], "label": "b"},
+    ]
+    assert _detected_batch_scale(boxes) == "norm"
+    assert _detected_batch_scale([{"box_2d": [100, 200, 300, 1400]}]) == "px"
+
+
+# ---------------------------------------------------------------------------
+# box_2d detection output (Gemma 4 native [ymin, xmin, ymax, xmax] / 1000)
+# ---------------------------------------------------------------------------
+
+
+def test_box_2d_yx_1000_derives_center_point():
+    # Gemma-style [ymin, xmin, ymax, xmax] -> contract [x1, y1, x2, y2].
+    item = {"box_2d": [200, 100, 400, 300], "label": "icon"}
+    assert _normalize_detected_box(item, "yx_1000", (1000, 2000), None) is True
+    assert item["box_2d"] == [100.0, 200.0, 300.0, 400.0]
+    assert item["point"] == [200.0, 300.0]
+
+
+def test_box_2d_xy_1000_keeps_axes():
+    item = {"box_2d": [100, 200, 300, 400]}
+    assert _normalize_detected_box(item, "xy_1000", (1000, 2000), None) is True
+    assert item["box_2d"] == [100.0, 200.0, 300.0, 400.0]
+    assert item["point"] == [200.0, 300.0]
+
+
+def test_box_2d_norm_scale_scales_and_swaps():
+    item = {"box_2d": [0.2, 0.1, 0.4, 0.3]}
+    assert _normalize_detected_box(item, "yx_norm", (1000, 2000), None) is True
+    assert item["box_2d"] == [100.0, 200.0, 300.0, 400.0]
+    assert item["point"] == [200.0, 300.0]
+
+
+def test_box_2d_keeps_valid_point():
+    item = {"point": [800, 200], "box_2d": [200, 100, 400, 300]}
+    assert _normalize_detected_box(item, "yx_1000", (1000, 2000), None) is False
+    _normalize_detected_point(item, "yx_1000", (1000, 2000), None)
+    assert item["point"] == [200.0, 800.0]
+    assert item["box_2d"] == [100.0, 200.0, 300.0, 400.0]
+
+
+def test_box_2d_replaces_unusable_point():
+    item = {"point": ["a", "b"], "box_2d": [200, 100, 400, 300]}
+    assert _normalize_detected_box(item, "yx_1000", (1000, 2000), None) is True
+    assert item["point"] == [200.0, 300.0]
+
+
+def test_invalid_box_2d_is_untouched():
+    for bad in ({"box_2d": [1, 2]}, {"box_2d": "x"}, {"box_2d": [1, 2, "c", 4]}):
+        item = dict(bad)
+        assert _normalize_detected_box(item, "yx_1000", (100, 100), None) is False
+        assert item == bad
 
 
 def test_batch_scale_override_fixes_norm_batch_under_1000_contract():
@@ -198,3 +256,43 @@ async def test_run_object_detection_uses_endpoint_coordinate_format():
     point = result["detected"][0]["point"]
     # 496px/992w -> 500x, 992px/1984h -> 500y on the 0-1000 grid.
     assert point == [pytest.approx(500.0), pytest.approx(500.0)]
+
+
+@pytest.mark.asyncio
+async def test_run_object_detection_accepts_box_2d_output():
+    """End-to-end: a box-only response (Gemma-style) still yields a contract point."""
+    import io
+    from unittest.mock import AsyncMock, patch
+
+    from PIL import Image
+
+    from artemis.agents.object_detector.object_detector import _run_object_detection
+
+    buf = io.BytesIO()
+    Image.new("RGB", (1000, 2000)).save(buf, format="PNG")
+    image_bytes = buf.getvalue()
+
+    fake_llm = SimpleNamespace(endpoint=SimpleNamespace(coordinate_format=None))
+    vlm_output = [{"box_2d": [200, 100, 400, 300], "label": "home button"}]
+
+    with (
+        patch(
+            "artemis.agents.object_detector.object_detector.get_llm",
+            return_value=fake_llm,
+        ),
+        patch(
+            "artemis.agents.object_detector.object_detector._detect_single_label",
+            new_callable=AsyncMock,
+            return_value=vlm_output,
+        ),
+    ):
+        ctx = SimpleNamespace(llm_config=SimpleNamespace())
+        result = await _run_object_detection(
+            ctx=ctx,
+            image_bytes=image_bytes,
+            queries=["home button"],
+        )
+
+    detected = result["detected"][0]
+    assert detected["point"] == [pytest.approx(200.0), pytest.approx(300.0)]
+    assert detected["box_2d"] == [100.0, 200.0, 300.0, 400.0]
