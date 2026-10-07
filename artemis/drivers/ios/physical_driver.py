@@ -179,15 +179,28 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
             try:
                 self._wda = await self._ensure_wda()
                 # The reachable WDA endpoint must belong to THIS device before
-                # we open a session or send input: names corroborate identity
-                # (uuid is identifierForVendor, not the UDID).
+                # we open a session or send input. WDA reports the product
+                # family name ("iPhone"), not the personalized devicectl name
+                # ("Dana's iPhone"), and uuid is identifierForVendor — so a
+                # *specific* conflicting name is the wrong-device signal;
+                # generic family names are accepted.
                 info = await self._wda.device_info()
-                expected_name = candidate.get("name") or ""
-                if (
-                    info.get("isSimulator") is not False
-                    or not expected_name
-                    or info.get("name") != expected_name
-                ):
+                expected_name = (candidate.get("name") or "").strip()
+                wda_name = str(info.get("name") or "").strip()
+                generic_names = {
+                    "iphone",
+                    "ipad",
+                    "ipod touch",
+                    "apple watch",
+                    "apple tv",
+                }
+                name_conflict = (
+                    expected_name
+                    and wda_name
+                    and wda_name.lower() not in generic_names
+                    and wda_name != expected_name
+                )
+                if info.get("isSimulator") is not False or name_conflict:
                     raise RuntimeError(
                         f"The WebDriverAgent at {self._wda.base_url} does not report "
                         f"the selected physical device {self._device_id} "
@@ -196,7 +209,13 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
                         "Point ARTEMIS_IOS_WDA_URL at a WDA server running on the "
                         "selected device."
                     )
-                self._session_key = await self._wda.open_session()
+                # A session auto-created by a runner WE launched is ours to
+                # adopt; an endpoint discovered via env/probe keeps the
+                # foreign-session refusal.
+                runner_owned = (
+                    self._wda_runner_pid is not None or self._wda_test_process is not None
+                )
+                self._session_key = await self._wda.open_session(adopt_existing=runner_owned)
                 await self.get_screen_data(skip_settling=True)
                 connected = True
             finally:

@@ -167,7 +167,7 @@ class WdaClient:
             )
         return value
 
-    async def _create_owned_session(self) -> str:
+    async def _create_owned_session(self, adopt_existing: bool) -> str:
         """Status preflight, POST /session, and ID assignment as one unit."""
         if self._session_id:
             return self._session_id
@@ -176,6 +176,11 @@ class WdaClient:
             raise WdaUnavailableError(f"WebDriverAgent at {self._base} did not answer /status.")
         active = status.get("sessionId")
         if isinstance(active, str) and active:
+            if adopt_existing:
+                # The driver launched this runner itself, so its auto-created
+                # session is ours to reuse — not a foreign client to protect.
+                self._session_id = active
+                return active
             raise RuntimeError(
                 "Refusing to replace the active WebDriverAgent session "
                 f"({active}), which this client does not own — POST /session "
@@ -201,14 +206,19 @@ class WdaClient:
         self._session_id = session_id
         return session_id
 
-    async def open_session(self) -> str:
+    async def open_session(self, adopt_existing: bool = False) -> str:
         """Create a WDA session, refusing to take over a foreign one.
+
+        ``adopt_existing=True`` reuses the active session reported by
+        ``/status``; only safe when the caller owns the WDA runner process
+        (auto-launched runners create a session on startup). Foreign or
+        user-provisioned endpoints must keep the default refusal.
 
         Cancellation-safe: when the caller is cancelled while creation is in
         flight, the request is drained and any session it produced is closed
         before the CancelledError propagates.
         """
-        create_task = asyncio.ensure_future(self._create_owned_session())
+        create_task = asyncio.ensure_future(self._create_owned_session(adopt_existing))
         try:
             return await asyncio.shield(create_task)
         except asyncio.CancelledError:

@@ -281,7 +281,8 @@ class _FakeWda:
     async def device_info(self, timeout=10.0):
         return {"name": self.device_name, "isSimulator": self.is_simulator}
 
-    async def open_session(self):
+    async def open_session(self, adopt_existing=False):
+        self.adopt_requested = adopt_existing
         self.opened_sessions += 1
         self.session_id = "wda-session"
         return self.session_id
@@ -1291,6 +1292,17 @@ async def test_open_session_refuses_a_foreign_active_session(responder):
 
 
 @pytest.mark.asyncio
+async def test_open_session_adopts_active_session_when_allowed(responder):
+    """A driver-launched runner's auto-session is adopted, not replaced."""
+    responder.set("/status", {"value": {"ready": True}, "sessionId": "auto-77"})
+    client = WdaClient("http://wda.test:8100")
+    assert await client.open_session(adopt_existing=True) == "auto-77"
+    assert client.session_id == "auto-77"
+    methods = {m for m, _url in responder.requests}
+    assert methods == {"GET"}  # adopted via /status — no POST /session
+
+
+@pytest.mark.asyncio
 async def test_open_session_reuses_its_own_session(responder):
     responder.set("/status", {"value": {"ready": True}, "sessionId": None})
     responder.set("/session", {"value": {"sessionId": "owned-1"}})
@@ -1414,6 +1426,36 @@ async def test_connect_rejects_a_simulator_wda(driver, monkeypatch):
     with pytest.raises(RuntimeError, match="ARTEMIS_IOS_WDA_URL"):
         await driver.connect()
     assert client.opened_sessions == 0
+
+
+@pytest.mark.asyncio
+async def test_connect_accepts_generic_wda_family_name(driver, monkeypatch):
+    # WDA reports the product family ("iPhone"), not the personalized
+    # devicectl name ("Jane's iPhone") — that is the same device.
+    client = _FakeWda(device_name="iPhone")
+    _connect_stubs(driver, monkeypatch, client)
+    await driver.connect()
+    assert client.opened_sessions == 1
+    await driver.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_connect_adopts_session_when_we_launched_the_runner(driver, monkeypatch):
+    client = _FakeWda()
+    _connect_stubs(driver, monkeypatch, client)
+    driver._wda_runner_pid = 4242  # _ensure_wda launched this runner
+    await driver.connect()
+    assert client.adopt_requested is True
+    await driver.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_connect_refuses_adoption_for_discovered_endpoints(driver, monkeypatch):
+    client = _FakeWda()
+    _connect_stubs(driver, monkeypatch, client)
+    await driver.connect()
+    assert client.adopt_requested is False
+    await driver.disconnect()
 
 
 # --- Disconnect cleanup ----------------------------------------------------- #
