@@ -1,0 +1,312 @@
+{
+  // ==============================================================================
+  // ☕ ARTEMIS Autonomous Agent & Framework Configuration — GEMMA 4 SPIKE
+  // ==============================================================================
+  // Single-model deployment: every node (reasoning + vision + grounding) resolves
+  // to one gemma-4-e4b endpoint on the ondevice-agent-platform server.
+  //
+  // ACTIVATION (pick one):
+  //   export ARTEMIS_ARTEMIS_JSONC=config/artemis.gemma4.jsonc
+  //   # or rename this file over artemis.jsonc
+  //
+  // PREREQUISITE: the :8080 platform must actually serve the "gemma-4-e4b" alias
+  // (curl http://127.0.0.1:8080/v1/models). Until it does, keep artemis.jsonc.
+  //
+  // Grounding notes:
+  //  - Gemma 4 emits detection natively as {"box_2d": [ymin,xmin,ymax,xmax]}
+  //    on a 0-1000 grid = this repo's default "yx_1000" coordinate_format, so
+  //    no override is set. The detector now derives "point" from the box center.
+  //  - Operator targets already use [x,y] on the same 0-1000 grid.
+
+  // ------------------------------------------------------------------------------
+  // 1. Global Default Model (Applied to all sub-agents unless overridden below)
+  // ------------------------------------------------------------------------------
+  "default": {
+    "provider": "custom",
+    // One unified multimodal model serves every role; the server alias must
+    // match the platform's registry entry (Gemma 4 E4B via the mlx-vlm provider,
+    // e.g. mlx-community/gemma-4-E4B-it-4bit).
+    "model": "gemma-4-e4b",
+    "api_base": "http://127.0.0.1:8080/v1",
+    // Local reasoning + vision encoder; keep the same generous timeout the
+    // qwen deployment needed for thinking preambles.
+    "timeout": 300,
+    "fallback": {
+      "provider": "custom",
+      "model": "gemma-4-e4b",
+      "api_base": "http://127.0.0.1:8080/v1",
+      "timeout": 300
+    }
+  },
+
+  // ------------------------------------------------------------------------------
+  // 2. Ready-to-Use Presets (Switch easily in code or CLI)
+  // ------------------------------------------------------------------------------
+  "presets": {
+    "gemini-flagship": {
+      "provider": "google",
+      "model": "gemini-3.8-flash",
+      "fallback": { "provider": "google", "model": "gemini-3.7-flash" }
+    },
+    "gemini-flash": {
+      "provider": "google",
+      "model": "gemini-2.5-flash",
+      "fallback": { "provider": "google", "model": "gemini-2.0-flash" }
+    },
+    "openai-gpt4o": {
+      "provider": "openai",
+      "model": "gpt-4o",
+      "fallback": { "provider": "openai", "model": "gpt-4o-mini" }
+    },
+    "cost-saving": {
+      "provider": "google",
+      "model": "gemini-3.5-flash-lite",
+      "fallback": { "provider": "google", "model": "gemini-3.1-flash-lite" }
+    },
+    "local-ollama": {
+      "provider": "openai",
+      "model": "llama3.2-vision",
+      "fallback": { "provider": "openai", "model": "llama3.2-vision" }
+    },
+    // Unified single-model route via ondevice-agent-platform (OpenAI-compatible).
+    "ondevice-gemma4": {
+      "provider": "custom",
+      "model": "gemma-4-e4b",
+      "api_base": "http://127.0.0.1:8080/v1",
+      "fallback": {
+        "provider": "custom",
+        "model": "gemma-4-e4b",
+        "api_base": "http://127.0.0.1:8080/v1"
+      }
+    }
+  },
+
+  // ------------------------------------------------------------------------------
+  // 3. Agent & Sub-Agent Node Customizations (Optional - Inherits from 'default')
+  // ------------------------------------------------------------------------------
+  "nodes": {
+    // 🧠 Planner: High-level goal decomposition and strategic step planning
+    "planner": {
+      "thinking_level": "high"
+    },
+
+    // 🎯 Operator: vision-capable by inheritance now — one model serves all roles.
+    "operator": {
+      "thinking_level": "medium",
+      "include_thoughts": true
+    },
+
+    // 🎬 Video Analyzer: inherits the unified endpoint; universal multi-model path
+    // feeds extracted keyframes as images.
+    "video_analyzer": {},
+
+    // 👁️ Object Detector: Gemma 4 native box_2d output is yx_1000 = the detector's
+    // declared default, so no coordinate_format override. box_2d collapses to a
+    // center point (and stays available as normalized bounds) downstream.
+    "object_detector": {
+      "timeout": 300
+    },
+
+    // 🔍 Explorer: inherits the unified endpoint.
+    "explorer": {
+      "thinking_level": "medium"
+    },
+
+    // 📋 Summarizer: Aggregates step history and generates structured outcome
+    "summarizer": {},
+
+    // 🔽 Hopper: Fast lightweight package name locator
+    "hopper": {},
+
+    // 📝 Outputter: Synthesizes execution trace into final output report
+    "outputter": {},
+
+    // 🪵 Log Analyzer: grounding is a Gemini-only feature — ineffective here.
+    "log_analyzer": {},
+
+    // 🩺 Diagnoser Expert
+    "diagnoser_expert": {},
+    // 🏛️ Committee Council Members
+    "planner_avatar": {},
+    "history_analyzer_expert": {},
+    // 🔎 Checker: Plan-declared checkpoint verification and exit final review.
+    "checker": {
+      "thinking_level": "medium",
+      "include_thoughts": true
+    }
+  },
+
+  // ------------------------------------------------------------------------------
+  // 4. Runtime Mode & Agent Capabilities Configuration (Dual-Engine: Flash vs. Pro)
+  // ------------------------------------------------------------------------------
+  "agent": {
+    // ==========================================================================
+    // ⚡ 4.1 FLASH Profile Options (Reactive Single-Agent Lightweight Loop)
+    // ==========================================================================
+    // Best for: Simple, fast, deterministic tasks; runs unbounded by default.
+    // Execution: Observe-Think-Act single LLM reactive loop without graph overhead.
+    "flash": {
+      "max_turns": 0, // Maximum reactive turns before stopping (0 = unlimited; history is bounded by transcript compression, not by a turn cap)
+      "explorer_mode": "flash", // Explorer tier for the Flash runner: 'flash' | 'pro' | 'ultra' (see top-level "explorer")
+      // 🧠 Step Summarizer: Asynchronous visual context compressor
+      // Summarizes intermediate steps in background without blocking the runner,
+      // replacing images only after strictly objective, high-density summaries are ready.
+      // LOCAL-MODEL NOTE: the visual-transition lens bypasses the LLM router
+      // (get_google_llm) — with no GOOGLE_API_KEY it crashes runner init.
+      // Disabled for the ondevice-platform deployment.
+      "step_summarizer": {
+        "enabled": false, // Whether background step summarization is active
+        "model": "gemini-3.5-flash-lite", // Lightweight model for fast background inference
+        "prune_history_xml": true // Prune outdated heavy XML trees from historical steps
+      }
+    },
+    // ==========================================================================
+    // 🚀 4.2 PRO Profile Options (Deep Multi-Agent Graph Closed-Loop)
+    // ==========================================================================
+    // Best for: Complex, exploratory, dynamic multi-branch tasks.
+    // Execution: LangGraph multi-node graph with a living task plan, a pre-execution safety net (single actions) / fast-action bursts (multi-action turns),
+    // execution-incident recovery handled by the Operator itself (no separate repair agent), and a read-only Checker for checkpoint verification + exit final review.
+    "pro": {
+      // 🧭 Explorer: Perception sub-agent under Pro profile ('flash', 'pro', or 'ultra')
+      "explorer": {
+        "mode": "flash" // Explorer tier for Pro nodes (Operator/Validator): 'flash' | 'pro' | 'ultra'
+      },
+      // 🎯 Planner Validation: Async verification when task plan milestones change
+      "planner_validation": {
+        "enabled": true // On by default: every milestone text change is reviewed (advisory: hint + reason only, never rolled back)
+      },
+      // 🏛️ Committee: Multi-Agent Council debate tool for Operator
+      "committee": {
+        "enabled": false,
+        "debate_rounds": 2
+      },
+      // 🔎 Checker: Plan-declared checkpoint verification (optimistic async) + exit final review
+      "checker": {
+        "enabled": true, // Master switch (compat alias): false disables both gates below
+        "midway_checks": false, // Plan-declared midway checkpoints (off in the factory layering)
+        "final_check": true, // Exit final review against the user's original goal (on by default)
+        "max_iterations": 20,
+        "final_check_max_attempts": 3,
+        "checkpoint_max_repairs": 2,
+        "max_concurrent_checkpoints": 3,
+        "checkpoint_timeout": 180.0,
+        "settlement_timeout": 120.0,
+        "assert_failure_policy": "continue", // 'continue' or 'halt' on assert failures
+        "device_probes": true // Checker's enumerated read-only device probes
+      },
+      // 🎬 Video Analyzer & Screen Recording: Continuous screen recording via scrcpy and temporal analysis
+      "video_analyzer": {
+        "enabled": true, // Whether continuous video recording and video tools are active (default: auto-detected)
+        "enable_ledger": true
+      }
+    },
+    // ==========================================================================
+    // 🌐 4.3 Shared Capabilities & Global Overrides
+    // ==========================================================================
+    // Shared step memory and history compression
+    // Transcript ledger + layered compression for the Pro operator.
+    "memory": {
+      // Background summarization runtime (visual/capsule lenses)
+      "runtime": {
+        "max_concurrency": 2, // 1→2 per 2026-09-01 baseline: serial queue pushed summary-ready P90 past the scrub window
+        "retry_limit": 3,
+        "flush_timeout_s": 30
+      },
+      "transcript": {
+        // ROLLBACK SWITCH: set false to restore the legacy per-turn 2-message
+        // prompt path byte-for-byte (L2/L3 chunk compression rides this same
+        // flag). See services/token_meter.py for measured session token usage
+        // and cache-hit ratios.
+        // LOCAL-MODEL NOTE: transcript + capsule lens are Google-bound
+        // (get_google_llm) — disabled under the ondevice-platform deployment.
+        "enabled": false,
+        "context_budget_tokens": 80000,
+        // Below start_ratio of the operator's own measured prompt size, closed
+        // segments only prepare their summary; the original turns are kept in
+        // context and replaced once occupancy reaches this ratio. Measurements
+        // come from the operator; other agents' calls do not affect this gate.
+        "start_ratio": 0.35,
+        "soft_ratio": 0.7,
+        "hard_ratio": 0.9,
+        "min_active_steps": 5,
+        // Screenshot edge: 6 while the operator's measured context is below
+        // start_ratio (nothing is being replaced yet), 3 from there up. A
+        // screenshot reaching the edge is replaced in place by its visual
+        // summary (the 'Current Screenshot' label leaves with it) and never
+        // restored; the depth only decides how long new ones stay.
+        "image_scrub_depth": 3,
+        "image_scrub_depth_relaxed": 6,
+        "pending_grace_steps": 3,
+        // Text edge: once a newer observation exists (depth 1) the UI element
+        // list, the plan recitation and the per-turn ephemeral blocks
+        // (reminders, hints, guidance wrappers) leave the older observation.
+        // User instruction bodies remain in history. The text edge stays
+        // shallow on purpose: only the live observation carries an indexed
+        // element list, so a stale [n] index can never be picked up as a
+        // target.
+        "xml_scrub_depth": 1,
+        // Local historical-state hint (no model call); distance calibrated
+        // 2026-09-01 from 460 dHash-stamped on-device steps (same screen <=4,
+        // different screens >=7).
+        "similarity_hint": true,
+        "similarity_max_distance": 5
+      },
+      // Segment (L2) chunk compression: three-band chunks, era folding
+      "chunking": {
+        "max_steps": 12,
+        // Size/pressure closes wait until at least this many turns are
+        // eligible, so heavy turns do not become one-step chunks (one capsule
+        // call each); milestone closes are exempt, the hard line waives it.
+        "min_steps": 3,
+        "target_source_tokens": 2000,
+        "model": "gemini-3.8-flash",
+        "max_chunks": 8
+        // "max_eras": 8 // independent era cap; omitted = follows max_chunks
+      },
+      // search_history: deterministic keyword / step-range lookup over stored history
+      "recall": {
+        "enabled": true,
+        "max_results": 5,
+        "max_text_tokens": 2000,
+        "screen_scan_steps": 150
+      },
+      // replay_steps: full step replays (whole trailing steps are dropped over budget)
+      "replay": {
+        "max_steps": 5,
+        "max_tokens": 12000
+      }
+    },
+    // 🎬 Screen Recording & Video Analyzer Configuration
+    "video_analyzer": {
+      "enabled": true, // Whether continuous screen recording via scrcpy is active (default: auto-detected)
+      "enable_ledger": true
+      // "processing": "auto", // How Gemini sub-agents watch a clip: auto (agentic on Gemini 3.6+ Flash, static elsewhere) | agentic | static
+      // "agentic_chunk_size_seconds": 600, // Longest clip one agentic sub-agent takes; static mode keeps chunk_size_seconds (60)
+      // "agentic_call_timeout_seconds": 300 // Hard timeout for one agentic sub-agent response
+    },
+    // 📝 Outputter: Post-execution report synthesis and structured schema extraction
+    // Reviews action history, notes, and verifies goal achievement to synthesize final output.
+    "outputter": {
+      "enabled": true, // Whether Outputter is mounted to synthesize final outputs
+      "force_synthesis": false // Force Outputter synthesis even without explicit output schema
+    },
+    // 🧭 Explorer tier: the perception sub-agent behind `ask_explorer`.
+    // Tiers are a user setting; calling agents never see which tier is active.
+    //   flash - one-shot visual detection on the screenshot (fastest)
+    //   pro   - 3-turn reasoning loop: UI-tree search + coordinate audit + detection
+    //   ultra - 8-turn loop adding zoom, OCR and pixel-level image processing (slowest)
+    // `flash.explorer_mode` and `pro.explorer.mode` above are the per-profile knobs;
+    // `caching` (Gemini explicit context caching) defaults per tier: off for pro, on for ultra.
+    "explorer": {
+      "default_version": "flash" // Fallback tier when no profile knob applies
+      // "caching": true, // Uncomment to force context caching for pro/ultra
+    },
+    // Advanced: per-agent tier override, e.g. {"validator": "ultra"}. Takes
+    // precedence over the profile knobs; leave empty to let them decide.
+    "explorer_versions": {},
+// 🚫 Per-agent Tool Denylists
+    "denylisted_tools": {
+      "explorer": [] // Perception tools to withhold from the Explorer, e.g. "ask_image_processor"
+    }
+  }
+}
