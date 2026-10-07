@@ -201,6 +201,19 @@ folder, or an expiring grant can require approval again. The Always/persistent
 choice belongs to you and Xcode; Artemis requests only scoped approval for its
 interpreter and the folder you select and never enables global access.
 
+Grant duration is Xcode's decision, not Artemis's: Xcode binds each agent
+approval to the requesting binary's code signature. A binary signed with a
+real signing identity can hold a persistent **Always Allow** grant, but an
+unsigned or adhoc-signed interpreter — the common case for `python3` from uv,
+Homebrew, or a virtual environment — receives a grant that expires after
+roughly 24 hours, and upgrading or replacing that interpreter binary requires
+re-approval either way. `xcrun mcp-server status` lists every grant with its
+expiry. On headless or CI machines an administrator can run
+`sudo xcrun mcp-server enable` to keep the service reachable while Xcode is
+closed; per-agent approval still applies unless the administrator also passes
+`--unsafe-always-allow-all-agents`, which lets any local process drive
+reachable projects and should stay disabled outside CI.
+
 ## Embedded Python SDK
 
 Configure iOS through the embedded SDK's builder:
@@ -385,10 +398,12 @@ the timeline rather than stretching recorded frames.
   `*WebDriverAgent*` was found to launch. Build and install the WDA runner
   (one-time steps above), or point `ARTEMIS_IOS_WDA_URL` at a forwarded or
   LAN-reachable server.
-- **WDA runner launches but never answers:** the runner may be crashing on
-  launch — check provisioning (`get-task-allow`, matching certificate) and
-  whether a free-team profile expired; also try forwarding port 8100
-  (`iproxy 8100 8100`) and setting `ARTEMIS_IOS_WDA_URL`.
+- **WDA runner launches but never answers:** unlock the device first — UI
+  Automation, and therefore WDA's HTTP server, cannot start while it is
+  locked. Otherwise the runner may be crashing on launch — check provisioning
+  (`get-task-allow`, matching certificate) and whether a free-team profile
+  expired; also try forwarding port 8100 (`iproxy 8100 8100`) and setting
+  `ARTEMIS_IOS_WDA_URL`.
 - **A queued iOS task runs on the wrong surface:** confirm the submission
   carried `platform: "ios"` (CLI `--platform ios`, web request `platform`,
   or the MCP `platform` argument); tasks default to Android.
