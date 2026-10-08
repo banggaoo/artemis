@@ -40,6 +40,7 @@ logger = get_logger(__name__)
 
 from artemis.agents.prompt_assembly import render_tool_enum, resolve_available
 from artemis.mcp.action_specs import OPERATOR_SHELL_ORDER
+from artemis.utils.image_mime import image_data_uri
 
 
 @lru_cache(maxsize=1)
@@ -392,7 +393,7 @@ class ObservationPromptComponent(PromptComponent):
         builder.add_human_content(
             {
                 "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{latest_screenshot_b64}"},
+                "image_url": {"url": image_data_uri(latest_screenshot_b64)},
             }
         )
         builder.add_human_content(f"--- Visible UI Elements ---\n{minimal_list}")

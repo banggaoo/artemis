@@ -95,6 +95,7 @@ from artemis.utils.coordinates import (
     parse_swipe_parameters,
 )
 from third_party.mobile_use.utils.logger import get_logger
+from artemis.utils.image_mime import image_data_uri
 
 logger = get_logger(__name__)
 
@@ -373,9 +374,7 @@ class FlashRunner:
         if img_bytes:
             img_b64 = base64.b64encode(img_bytes).decode("utf-8")
             blocks.append({"type": "text", "text": "--- Current Screenshot ---"})
-            blocks.append(
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
-            )
+            blocks.append({"type": "image_url", "image_url": {"url": image_data_uri(img_b64)}})
         if xml_list:
             blocks.append({"type": "text", "text": f"{PRO_UI_LIST_MARKER}\n{xml_list}"})
         ephemeral: list[int] = []
