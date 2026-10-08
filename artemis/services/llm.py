@@ -929,6 +929,9 @@ def _resolve_endpoint(
     return ModelEndpoint(
         provider=ModelProvider.from_string(provider_val),
         model_name=str(model_val),
+        api_base=_get_val(cfg, "api_base", str),
+        api_key=_get_val(cfg, "api_key", str),
+        max_tokens=_get_val(cfg, "max_tokens", int),
         temperature=_get_val(cfg, "temperature", (int, float)) or 0.0,
         timeout_seconds=_get_val(cfg, "timeout", (int, float)) or 60.0,
         thinking_budget=_get_val(cfg, "thinking_budget", int),
