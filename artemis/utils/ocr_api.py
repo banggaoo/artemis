@@ -28,9 +28,12 @@ logger = get_logger(__name__)
 _HTTP_CLIENT: httpx.AsyncClient | None = None
 
 # Provider selection via ARTEMIS_OCR_PROVIDER: "auto" (default) prefers
-# on-device Apple Vision on macOS and falls back to Google Cloud Vision when
-# an API key exists; "apple" / "google" pin a single provider.
+# on-device Apple Vision on macOS, then the local platform vision-hybrid
+# route (Apple Vision first, VLM delegate), then Google Cloud Vision when
+# an API key exists; "apple" / "platform" / "google" pin a single provider.
 _OCR_PROVIDER_ENV = "ARTEMIS_OCR_PROVIDER"
+_OAP_API_BASE_ENV = "OAP_API_BASE"
+_OAP_OCR_MODEL_ENV = "OAP_OCR_MODEL"
 _APPLE_VISION_SUPPORTED: bool | None = None
 _APPLE_OCR_WORKER = Path(__file__).with_name("apple_vision_ocr.py")
 
@@ -92,11 +95,14 @@ def _google_vision_key_present() -> bool:
 
 
 def is_ocr_configured() -> bool:
-    """True when some OCR provider is usable: Apple Vision on macOS, or a
-    configured Google Cloud Vision API key."""
+    """True when some OCR provider is usable: Apple Vision on macOS, the
+    local platform vision-hybrid route, or a configured Google Cloud
+    Vision API key."""
     provider = _ocr_provider()
     if provider == "apple":
         return _apple_vision_available()
+    if provider == "platform":
+        return True  # loopback endpoint; reachability checked at call time
     if provider == "google":
         return _google_vision_key_present()
     return _apple_vision_available() or _google_vision_key_present()
@@ -157,6 +163,55 @@ async def _run_apple_vision(image_bytes: bytes) -> list[dict[str, Any]]:
     return results
 
 
+def _oap_ocr_endpoint() -> tuple[str, str]:
+    base = os.environ.get(
+        _OAP_API_BASE_ENV, "http://127.0.0.1:8080/v1"
+    ).rstrip("/")
+    return f"{base}/chat/completions", os.environ.get(
+        _OAP_OCR_MODEL_ENV, "vision-hybrid"
+    )
+
+
+async def _run_platform_ocr(
+    screenshot_b64: str,
+    client: httpx.AsyncClient | None = None,
+) -> list[dict[str, Any]]:
+    """OCR via the local platform's vision-hybrid route (Apple Vision
+    first, VLM delegate when the image is not plain text extraction).
+    Structured observations arrive in the additive ``oap_ocr`` response
+    field as ``{text, confidence, position}`` with position already in
+    pixel vertices (TL,TR,BR,BL). An escalated VLM answer carries no
+    positions and yields ``[]`` - callers treat it like an empty OCR."""
+    url, model = _oap_ocr_endpoint()
+    payload = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text",
+                 "text": "Extract all text from this image."},
+                {"type": "image_url",
+                 "image_url": {
+                     "url": "data:image/png;base64," + screenshot_b64}},
+            ],
+        }],
+    }
+    active_client = client if client is not None else get_http_client()
+    response = await active_client.post(url, json=payload, timeout=30.0)
+    response.raise_for_status()
+    results = []
+    for obs in response.json().get("oap_ocr") or []:
+        text = obs.get("text")
+        position = obs.get("position")
+        if (
+            isinstance(text, str)
+            and text.strip()
+            and isinstance(position, list)
+        ):
+            results.append({"text": text, "position": position})
+    return results
+
+
 async def perform_ocr(
     screenshot_b64: str,
     client: httpx.AsyncClient | None = None,
@@ -187,6 +242,17 @@ async def perform_ocr(
             return []
     if provider == "apple":
         return []
+    if provider == "platform":
+        try:
+            return await _run_platform_ocr(screenshot_b64, client)
+        except Exception as e:
+            logger.warning(f"platform vision-hybrid OCR failed: {e}")
+            return []
+    if provider == "auto":
+        try:
+            return await _run_platform_ocr(screenshot_b64, client)
+        except Exception:
+            pass  # daemon absent - fall through to Google if keyed
 
     api_key = _google_vision_key()
     if not api_key:
