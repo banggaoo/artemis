@@ -32,44 +32,41 @@ from artemis.utils.visualization import format_minimal_list_with_elements
 
 
 @pytest.mark.asyncio
-async def test_is_ocr_configured_false_when_google_pin_unset(monkeypatch):
-    """Google-only provider with no key reports OCR as unconfigured."""
+async def test_is_ocr_configured_false_when_unset(monkeypatch):
+    """Verify is_ocr_configured returns False when keys are unset or placeholder."""
     monkeypatch.delenv("OCR_API_KEY", raising=False)
     monkeypatch.delenv("VISION_API_KEY", raising=False)
     monkeypatch.delenv("API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    monkeypatch.setenv("ARTEMIS_OCR_PROVIDER", "google")
 
-    with patch.object(Settings, "get_api_key", return_value=None):
+    with (
+        patch.object(Settings, "get_api_key", return_value=None),
+        patch("artemis.utils.ocr_api._apple_vision_supported", return_value=False),
+    ):
         assert not is_ocr_configured()
 
 
 @pytest.mark.asyncio
-async def test_perform_ocr_returns_empty_list_when_platform_down(monkeypatch):
-    """Platform unreachable with no Google key degrades to []."""
-    monkeypatch.delenv("OCR_API_KEY", raising=False)
-    monkeypatch.delenv("VISION_API_KEY", raising=False)
+async def test_perform_ocr_returns_empty_list_when_unconfigured(monkeypatch):
+    """Verify perform_ocr returns [] when no OCR provider is available."""
     with (
         patch.object(Settings, "get_api_key", return_value=None),
-        patch(
-            "artemis.utils.ocr_api._run_platform_ocr",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("daemon down"),
-        ),
+        patch("artemis.utils.ocr_api._apple_vision_supported", return_value=False),
+        patch.dict("os.environ", {}, clear=True),
     ):
         result = await perform_ocr(screenshot_b64="dummy_b64")
         assert result == []
 
 
 @pytest.mark.asyncio
-async def test_perform_ocr_executes_api_call_when_configured(monkeypatch):
+async def test_perform_ocr_executes_api_call_when_configured():
     """Verify perform_ocr makes API request and parses responses when configured."""
-    monkeypatch.setenv("ARTEMIS_OCR_PROVIDER", "google")
     mock_key = MagicMock()
     mock_key.get_secret_value.return_value = "test_key"
 
     with (
         patch.object(Settings, "get_api_key", return_value=mock_key),
+        patch("artemis.utils.ocr_api._apple_vision_supported", return_value=False),
         patch("artemis.utils.ocr_api.get_http_client") as mock_client,
     ):
         mock_resp = MagicMock()
@@ -98,43 +95,48 @@ async def test_perform_ocr_executes_api_call_when_configured(monkeypatch):
         assert result[0]["text"] == "Login"
 
 
-def test_is_ocr_configured_true_with_platform(monkeypatch):
-    """The platform vision-hybrid route (no Google key) makes OCR available."""
+def test_is_ocr_configured_true_with_apple_vision(monkeypatch):
+    """Apple Vision alone (no Google key) makes OCR available on macOS."""
     monkeypatch.delenv("OCR_API_KEY", raising=False)
     monkeypatch.delenv("VISION_API_KEY", raising=False)
-    with patch.object(Settings, "get_api_key", return_value=None):
+    with (
+        patch.object(Settings, "get_api_key", return_value=None),
+        patch("artemis.utils.ocr_api._apple_vision_supported", return_value=True),
+    ):
         assert is_ocr_configured()
 
 
 @pytest.mark.asyncio
-async def test_perform_ocr_uses_platform_first(monkeypatch):
-    """Under auto provider, the platform vision-hybrid route answers first."""
+async def test_perform_ocr_uses_apple_vision_first(monkeypatch):
+    """Under auto provider, on-device Apple Vision answers without any HTTP call."""
     monkeypatch.delenv("OCR_API_KEY", raising=False)
     monkeypatch.delenv("VISION_API_KEY", raising=False)
-    platform_result = [{"text": "Login", "position": [{"x": 1, "y": 2}]}]
+    apple_result = [{"text": "Login", "position": [{"x": 1, "y": 2}]}]
     with (
         patch.object(Settings, "get_api_key", return_value=None),
+        patch("artemis.utils.ocr_api._apple_vision_supported", return_value=True),
         patch(
-            "artemis.utils.ocr_api._run_platform_ocr",
+            "artemis.utils.ocr_api._run_apple_vision",
             new_callable=AsyncMock,
-            return_value=platform_result,
-        ) as mock_platform,
+            return_value=apple_result,
+        ) as mock_apple,
     ):
         result = await perform_ocr(screenshot_b64="aGVsbG8=")
-        assert result == platform_result
-        mock_platform.assert_awaited_once_with("aGVsbG8=", None)
+        assert result == apple_result
+        mock_apple.assert_awaited_once_with(b"hello")
 
 
 @pytest.mark.asyncio
-async def test_perform_ocr_falls_back_to_google_on_platform_failure():
-    """A platform call error under auto falls back to a keyed Google Vision."""
+async def test_perform_ocr_falls_back_to_google_on_apple_failure():
+    """An Apple Vision error under auto falls back to a keyed Google Vision."""
     mock_key = MagicMock()
     mock_key.get_secret_value.return_value = "test_key"
 
     with (
         patch.object(Settings, "get_api_key", return_value=mock_key),
+        patch("artemis.utils.ocr_api._apple_vision_supported", return_value=True),
         patch(
-            "artemis.utils.ocr_api._run_platform_ocr",
+            "artemis.utils.ocr_api._run_apple_vision",
             new_callable=AsyncMock,
             side_effect=RuntimeError("boom"),
         ),
@@ -164,14 +166,15 @@ async def test_perform_ocr_falls_back_to_google_on_platform_failure():
 
 
 @pytest.mark.asyncio
-async def test_perform_ocr_platform_failure_without_key_returns_empty(monkeypatch):
-    """Platform failure with no Google key degrades to [] instead of raising."""
+async def test_perform_ocr_apple_failure_without_key_returns_empty(monkeypatch):
+    """Apple failure with no Google key degrades to [] instead of raising."""
     monkeypatch.delenv("OCR_API_KEY", raising=False)
     monkeypatch.delenv("VISION_API_KEY", raising=False)
     with (
         patch.object(Settings, "get_api_key", return_value=None),
+        patch("artemis.utils.ocr_api._apple_vision_supported", return_value=True),
         patch(
-            "artemis.utils.ocr_api._run_platform_ocr",
+            "artemis.utils.ocr_api._run_apple_vision",
             new_callable=AsyncMock,
             side_effect=RuntimeError("boom"),
         ),
@@ -180,16 +183,16 @@ async def test_perform_ocr_platform_failure_without_key_returns_empty(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_perform_ocr_forced_platform_never_calls_google(monkeypatch):
-    """ARTEMIS_OCR_PROVIDER=platform must not fall through to the cloud
-    provider even when the platform call fails."""
-    monkeypatch.setenv("ARTEMIS_OCR_PROVIDER", "platform")
+async def test_perform_ocr_forced_apple_never_calls_google(monkeypatch):
+    """ARTEMIS_OCR_PROVIDER=apple must not fall through to the cloud provider."""
+    monkeypatch.setenv("ARTEMIS_OCR_PROVIDER", "apple")
     mock_key = MagicMock()
     mock_key.get_secret_value.return_value = "test_key"
     with (
         patch.object(Settings, "get_api_key", return_value=mock_key),
+        patch("artemis.utils.ocr_api._apple_vision_supported", return_value=True),
         patch(
-            "artemis.utils.ocr_api._run_platform_ocr",
+            "artemis.utils.ocr_api._run_apple_vision",
             new_callable=AsyncMock,
             side_effect=RuntimeError("boom"),
         ),
@@ -197,6 +200,51 @@ async def test_perform_ocr_forced_platform_never_calls_google(monkeypatch):
     ):
         assert await perform_ocr(screenshot_b64="aGVsbG8=") == []
         mock_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_perform_ocr_apple_breaker_stops_dispatch_after_failures(monkeypatch):
+    """Consecutive Apple subprocess failures disable the provider; a third
+    call must not spawn another worker."""
+    import artemis.utils.ocr_api as ocr_api
+
+    monkeypatch.delenv("OCR_API_KEY", raising=False)
+    monkeypatch.delenv("VISION_API_KEY", raising=False)
+    monkeypatch.setattr(ocr_api, "_apple_vision_consecutive_failures", 0)
+    with (
+        patch.object(Settings, "get_api_key", return_value=None),
+        patch("artemis.utils.ocr_api._apple_vision_supported", return_value=True),
+        patch(
+            "artemis.utils.ocr_api._apple_vision_subprocess",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("wedged"),
+        ) as mock_worker,
+    ):
+        assert await perform_ocr(screenshot_b64="aGVsbG8=") == []
+        assert await perform_ocr(screenshot_b64="aGVsbG8=") == []
+        assert mock_worker.await_count == 4
+        assert await perform_ocr(screenshot_b64="aGVsbG8=") == []
+        assert not ocr_api.is_ocr_configured()
+        assert mock_worker.await_count == 4
+
+
+def test_vision_box_to_vertices_converts_bottom_left_origin():
+    """Vision's normalized bottom-left box maps to TL/TR/BR/BL pixel vertices."""
+    from types import SimpleNamespace
+
+    from artemis.utils.apple_vision_ocr import _vision_box_to_vertices
+
+    bb = SimpleNamespace(
+        origin=SimpleNamespace(x=0.1, y=0.8),
+        size=SimpleNamespace(width=0.2, height=0.05),
+    )
+    vertices = _vision_box_to_vertices(bb, width=1000, height=2000)
+    assert vertices == [
+        {"x": 100, "y": 300},
+        {"x": 300, "y": 300},
+        {"x": 300, "y": 400},
+        {"x": 100, "y": 400},
+    ]
 
 
 def test_fuse_ocr_with_xml_empty_ocr_retains_xml_pruning():
