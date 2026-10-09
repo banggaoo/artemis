@@ -608,3 +608,20 @@ async def test_distinct_thought_turns_do_not_trip_the_stall_guard(mock_context):
     assert report["status"] == "failed"
     assert "identical response" not in report["explanation"]
     assert runner._invoke_model.await_count == 5
+
+
+@pytest.mark.asyncio
+async def test_paraphrased_thought_streak_still_stalls_out(mock_context):
+    """Alternating wording evades the identical-text guard — the streak cap
+    catches it anyway (observed live: 23 tool-less turns cycling two phrases)."""
+    from artemis.agents.flash.runner import MAX_SILENT_TURN_STREAK
+
+    responses = ["planning the scroll", "still observing the page"] * (
+        MAX_SILENT_TURN_STREAK // 2 + 1
+    )
+    runner = _loop_ready_runner(mock_context, responses)
+    report = await runner.run(Mock())
+
+    assert report["status"] == "failed"
+    assert "consecutive turns" in report["explanation"]
+    assert runner._invoke_model.await_count == MAX_SILENT_TURN_STREAK
