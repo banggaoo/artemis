@@ -9,8 +9,8 @@
   "default": {
     "provider": "custom",
     // gemma4-e4b via ondevice-agent-platform (mlx-vlm gemma4 route);
-    // vision nodes use gemma4-e4b (semantic/grounding); vision-hybrid
-    // is the OCR-only route (Apple Vision first, qwen-vl escalation).
+    // vision nodes use gemma4-e4b (semantic/grounding). OCR is handled
+    // in-process: Apple Vision on macOS, Google Cloud Vision when keyed.
     "model": "gemma4-e4b",
     "api_base": "http://127.0.0.1:8080/v1",
     // Local 9B reasoning runs ~15-30 tok/s with a thinking preamble;

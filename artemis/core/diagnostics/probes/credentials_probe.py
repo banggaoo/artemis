@@ -144,6 +144,29 @@ class LLMCredentialsProbe(BaseProbe):
                 )
                 api_keys_map[prov_id] = val.strip()
 
+        # Config-bound local endpoints (e.g. ondevice-agent-platform) need no
+        # API key: the custom provider authenticates to a loopback server.
+        try:
+            from artemis.core.diagnostics.probes.local_model_probe import (
+                _local_endpoints,
+            )
+
+            for base, models in _local_endpoints().items():
+                configured_providers.append(
+                    {
+                        "provider": "custom",
+                        "label": "Local Model Endpoint",
+                        "masked": base,
+                        "raw_key": base,
+                        "key": base,
+                    }
+                )
+                api_keys_map["custom"] = base
+                for alias in models:
+                    api_keys_map.setdefault(alias, base)
+        except Exception:
+            pass
+
         if ocr_key and not is_placeholder_key(ocr_key):
             api_keys_map["ocr"] = ocr_key.get_secret_value()
 
