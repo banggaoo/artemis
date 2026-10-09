@@ -56,7 +56,7 @@ import threading
 import time
 from typing import Any, TypeVar
 
-from artemis.runtime.adb_endpoint import normalize_device_platform
+from artemis.runtime.device_target import normalize_device_platform
 from artemis.runtime.device_lock import DeviceExecutionLock
 from artemis.runtime.ios_observation import observe_ios_controller
 from third_party.mobile_use.utils.logger import get_logger

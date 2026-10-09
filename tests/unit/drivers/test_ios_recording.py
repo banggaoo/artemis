@@ -304,11 +304,18 @@ async def test_busy_spawn_reaps_cross_device_orphan_and_retries(
 @pytest.mark.asyncio
 async def test_startup_cancellation_reaps_child(recorder_env, monkeypatch, tmp_path):
     proc = FakeRecorderProcess(FakeStderr(lines=[]))  # marker never arrives
-    patch_spawn(monkeypatch, [proc])
+    created = patch_spawn(monkeypatch, [proc])
     recorder = IosScreenRecorder(UDID)
 
     task = asyncio.create_task(recorder.start(output_dir=tmp_path))
-    await asyncio.sleep(0.02)
+    # The pre-spawn stale-recorder sweep adds a suspension point before the
+    # child exists; cancel only after spawn so the in-flight child is reaped.
+    for _ in range(200):
+        if created:
+            break
+        await asyncio.sleep(0.005)
+    assert created, "recorder child was never spawned"
+    await asyncio.sleep(0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task

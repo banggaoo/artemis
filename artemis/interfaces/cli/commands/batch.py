@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Annotated
 
 from artemis.config import initialize_llm_config
-from artemis.runtime.adb_endpoint import normalize_device_platform
+from artemis.runtime.device_target import normalize_device_platform
 from artemis.sdk import Agent
 from artemis.sdk.builders import Builders
 from third_party.mobile_use.sdk.types.task import AgentProfile

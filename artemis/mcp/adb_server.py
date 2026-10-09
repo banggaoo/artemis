@@ -45,7 +45,7 @@ from artemis.context import ArtemisContext, DeviceContext, DevicePlatform
 from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.platform import platform
 from artemis.drivers.ios.discovery import BOOTED_SIMULATOR_ID
-from artemis.runtime.adb_endpoint import normalize_device_platform
+from artemis.runtime.device_target import normalize_device_platform
 from third_party.mobile_use.utils.app_launch_utils import launch_app_with_retries
 
 # Placeholder iOS screen metrics for the lazy context — the driver replaces

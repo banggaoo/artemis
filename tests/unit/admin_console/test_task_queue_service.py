@@ -1161,7 +1161,7 @@ async def test_enqueue_tasks_platforms_do_not_dedupe_against_each_other():
 
 def test_task_target_ios_skips_a_malformed_adb_endpoint():
     """iOS items never parse their stale/malformed Android endpoint snapshot."""
-    from artemis.runtime.adb_endpoint import IosTarget
+    from artemis.runtime.device_target import IosTarget
 
     target = TaskQueueService._task_target(
         {
@@ -1175,7 +1175,7 @@ def test_task_target_ios_skips_a_malformed_adb_endpoint():
 
 
 def test_task_target_android_still_validates_its_endpoint():
-    from artemis.runtime.adb_endpoint import AdbTarget
+    from artemis.runtime.device_target import AdbTarget
 
     with pytest.raises((ValueError, TypeError)):
         TaskQueueService._task_target(

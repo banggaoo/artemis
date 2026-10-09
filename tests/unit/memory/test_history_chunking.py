@@ -30,6 +30,7 @@ step addressability (step number + ``T+mm:ss``) after every compression level
 import json
 import re
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -367,19 +368,19 @@ def test_capsule_lens_rides_configured_provider_when_not_google(monkeypatch):
     monkeypatch.setattr(
         services_llm,
         "get_llm",
-        lambda ctx, name, **kwargs: (
-            calls.update(
-                {"path": "get_llm", "name": name, "temperature": kwargs.get("temperature")}
-            )
-            or object()
-        ),
+        lambda ctx, name, **kwargs: calls.update(
+            {"path": "get_llm", "name": name, "temperature": kwargs.get("temperature")}
+        )
+        or object(),
     )
     monkeypatch.setattr(
         services_llm,
         "get_google_llm",
         lambda **kwargs: calls.update({"path": "get_google_llm"}) or object(),
     )
-    ctx = SimpleNamespace(llm_config=SimpleNamespace(summarizer=SimpleNamespace(provider="custom")))
+    ctx = SimpleNamespace(
+        llm_config=SimpleNamespace(summarizer=SimpleNamespace(provider="custom"))
+    )
     lens = StepCapsuleLens(model_name="test", ctx=ctx)
     assert lens._get_llm() is not None
     assert calls["path"] == "get_llm"
@@ -399,12 +400,14 @@ def test_capsule_lens_keeps_raw_google_path_for_google_provider(monkeypatch):
     monkeypatch.setattr(
         services_llm,
         "get_google_llm",
-        lambda **kwargs: (
-            calls.update({"path": "get_google_llm", "model_name": kwargs.get("model_name")})
-            or object()
-        ),
+        lambda **kwargs: calls.update(
+            {"path": "get_google_llm", "model_name": kwargs.get("model_name")}
+        )
+        or object(),
     )
-    ctx = SimpleNamespace(llm_config=SimpleNamespace(summarizer=SimpleNamespace(provider="google")))
+    ctx = SimpleNamespace(
+        llm_config=SimpleNamespace(summarizer=SimpleNamespace(provider="google"))
+    )
     lens = StepCapsuleLens(model_name="test-model", ctx=ctx)
     assert lens._get_llm() is not None
     assert calls["path"] == "get_google_llm"

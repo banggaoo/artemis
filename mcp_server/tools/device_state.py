@@ -20,7 +20,7 @@ import os
 
 from mcp_server.base import mcp
 from artemis.mcp.adb_server import _get_controller
-from artemis.runtime.adb_endpoint import normalize_device_platform
+from artemis.runtime.device_target import normalize_device_platform
 from artemis.runtime.ios_observation import observe_ios_controller
 from mcp_server.utils import env_utils
 from artemis.utils.ocr_xml_fusion import (

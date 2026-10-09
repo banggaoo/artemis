@@ -42,7 +42,7 @@ except Exception:
     load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 from artemis.runtime import trace_store
-from artemis.runtime.adb_endpoint import normalize_device_platform
+from artemis.runtime.device_target import normalize_device_platform
 from mcp_server.notifiers import notify
 from mcp_server.utils import device_utils
 

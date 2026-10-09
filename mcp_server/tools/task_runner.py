@@ -36,7 +36,7 @@ from artemis.runtime import (
     submit_task_to_daemon,
     trace_store,
 )
-from artemis.runtime.adb_endpoint import device_pool_for, normalize_device_platform
+from artemis.runtime.device_target import device_pool_for, normalize_device_platform
 
 # Seconds the spawned runner gets to finish its imports and open its log files
 # before the spawn is declared dead. Normal startup creates stdout.log within a

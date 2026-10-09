@@ -47,7 +47,7 @@ from artemis.context import (
 from artemis.data_engine.engine import DataEngine
 from artemis.graph.state import State
 from artemis.runtime import DeviceExecutionLock, trace_store
-from artemis.runtime.adb_endpoint import IOS_LOCK_SCOPE
+from artemis.runtime.device_target import IOS_LOCK_SCOPE
 from artemis.runtime.cancel_requests import watch_for_cancel_request
 from artemis.sdk.run_outcome import attach_test_summary, resolve_trace_suffix
 from artemis.sdk.types.agent import AgentConfig

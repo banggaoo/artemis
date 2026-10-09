@@ -29,7 +29,7 @@ from pathlib import Path
 
 from artemis.config.paths import get_temp_dir
 from artemis.runtime import DeviceExecutionLock, ios_device_pool
-from artemis.runtime.adb_endpoint import IOS_LOCK_SCOPE
+from artemis.runtime.device_target import IOS_LOCK_SCOPE
 from artemis.toolchain import find_adb
 
 logger = logging.getLogger("artemis.stream_service")

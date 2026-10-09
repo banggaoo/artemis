@@ -21,14 +21,12 @@ from artemis.runtime.device_lock import (
 )
 from artemis.runtime.adb_endpoint import (
     ADB_ENDPOINT_ID_ENV,
-    IOS_LOCK_SCOPE,
     AdbEndpoint,
     AdbSession,
-    AdbTarget,
     InvalidAdbEndpoint,
-    IosTarget,
     current_adb_endpoint,
 )
+from artemis.runtime.device_target import IOS_LOCK_SCOPE, AdbTarget, IosTarget
 from artemis.runtime.device_pool import DevicePool, DeviceStatus, device_pool
 from artemis.runtime.ios_device_pool import IosDevicePool, ios_device_pool
 from artemis.runtime.process_probe import pid_is_alive
