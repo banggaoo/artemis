@@ -3,13 +3,13 @@
   // ☕ ARTEMIS Autonomous Agent & Framework Configuration — GEMMA 4 SPIKE
   // ==============================================================================
   // Single-model deployment: every node (reasoning + vision + grounding) resolves
-  // to one gemma-4-e4b endpoint on the ondevice-agent-platform server.
+  // to one gemma4-e4b endpoint on the ondevice-agent-platform server.
   //
   // ACTIVATION (pick one):
   //   export ARTEMIS_ARTEMIS_JSONC=config/artemis.gemma4.jsonc
   //   # or rename this file over artemis.jsonc
   //
-  // PREREQUISITE: the :8080 platform must actually serve the "gemma-4-e4b" alias
+  // PREREQUISITE: the :8080 platform must actually serve the "gemma4-e4b" alias
   // (curl http://127.0.0.1:8080/v1/models). Until it does, keep artemis.jsonc.
   //
   // Grounding notes:
@@ -26,14 +26,14 @@
     // One unified multimodal model serves every role; the server alias must
     // match the platform's registry entry (Gemma 4 E4B via the mlx-vlm provider,
     // e.g. mlx-community/gemma-4-E4B-it-4bit).
-    "model": "gemma-4-e4b",
+    "model": "gemma4-e4b",
     "api_base": "http://127.0.0.1:8080/v1",
     // Local reasoning + vision encoder; keep the same generous timeout the
     // qwen deployment needed for thinking preambles.
     "timeout": 300,
     "fallback": {
       "provider": "custom",
-      "model": "gemma-4-e4b",
+      "model": "gemma4-e4b",
       "api_base": "http://127.0.0.1:8080/v1",
       "timeout": 300
     }
@@ -71,11 +71,11 @@
     // Unified single-model route via ondevice-agent-platform (OpenAI-compatible).
     "ondevice-gemma4": {
       "provider": "custom",
-      "model": "gemma-4-e4b",
+      "model": "gemma4-e4b",
       "api_base": "http://127.0.0.1:8080/v1",
       "fallback": {
         "provider": "custom",
-        "model": "gemma-4-e4b",
+        "model": "gemma4-e4b",
         "api_base": "http://127.0.0.1:8080/v1"
       }
     }
