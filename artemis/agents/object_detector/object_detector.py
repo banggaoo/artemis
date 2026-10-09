@@ -27,6 +27,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 
 from artemis.llm.structured import ParseFailure, parse_structured
 from artemis.services.llm import get_llm
+from artemis.utils.image_codec import image_data_uri
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -218,7 +219,7 @@ async def _detect_single_label(
                 content=[
                     {
                         "type": "image_url",
-                        "image_url": {"url": f"data:{mime_type};base64,{img_b64}"},
+                        "image_url": {"url": image_data_uri(img_b64)},
                     },
                     {"type": "text", "text": prompt},
                 ]

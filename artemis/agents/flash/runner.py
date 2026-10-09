@@ -70,6 +70,7 @@ from artemis.config import (
     MemoryTranscriptConfig,
     StepSummarizerConfig,
     load_agent_config,
+    settings,
 )
 from artemis.context import ArtemisContext
 from artemis.controllers.unified_controller import UnifiedMobileController
@@ -78,6 +79,7 @@ from artemis.graph.perception import _check_injected_instruction_file
 from artemis.graph.state import State
 from artemis.llm.structured import ParseFailure, parse_structured
 from artemis.mcp.action_executor import McpActionExecutor
+from artemis.utils.image_codec import image_data_uri
 from artemis.mcp.observation import observe
 from artemis.memory.transcript import PRO_UI_LIST_MARKER, TranscriptLedger, mark_ephemeral
 from artemis.services.llm import (
@@ -369,9 +371,7 @@ class FlashRunner:
         if img_bytes:
             img_b64 = base64.b64encode(img_bytes).decode("utf-8")
             blocks.append({"type": "text", "text": "--- Current Screenshot ---"})
-            blocks.append(
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
-            )
+            blocks.append({"type": "image_url", "image_url": {"url": image_data_uri(img_b64)}})
         if xml_list:
             blocks.append({"type": "text", "text": f"{PRO_UI_LIST_MARKER}\n{xml_list}"})
         ephemeral: list[int] = []
@@ -883,6 +883,9 @@ class FlashRunner:
 
     async def _invoke_model(self, llm, current_tools: list, messages: list[BaseMessage]):
         """Binds the active tools and invokes the model through the LLM gateway."""
+        # Keep only the latest screenshot: strict gateways cap images per
+        # request, and earlier frames are stale context anyway.
+        self._prune_intermediate_screenshots(messages)
         # Bind active tools
         bound_llm = llm.bind_tools(current_tools)
 
@@ -890,7 +893,9 @@ class FlashRunner:
         # retries, and pause/resume are all owned by the LLM gateway
         # (acomplete); a typed LLMCallError propagates if it gives up.
         return await invoke_llm_with_timeout_message(
-            acomplete(bound_llm, messages), timeout_seconds=10, hard_timeout=180
+            acomplete(bound_llm, messages),
+            timeout_seconds=10,
+            hard_timeout=settings.LLM_FLASH_HARD_TIMEOUT_SECONDS,
         )
 
     async def _process_tool_calls(

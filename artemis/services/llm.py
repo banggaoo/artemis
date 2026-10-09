@@ -595,6 +595,11 @@ class RobustChatModelWrapper:
 
     def with_structured_output(self, *args, **kwargs):
         if hasattr(self.base_model, "with_structured_output"):
+            if self._provider_value() == ModelProvider.CUSTOM.value:
+                # The local OpenAI-compatible endpoint rejects strict JSON-schema
+                # response_format requests; function calling yields the same
+                # structured result through tool calls it does support.
+                kwargs.setdefault("method", "function_calling")
             return RobustChatModelWrapper(
                 self.base_model.with_structured_output(*args, **kwargs),
                 self.ctx,
