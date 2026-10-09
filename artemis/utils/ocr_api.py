@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import base64
+import json
 import os
+from pathlib import Path
+import sys
 from typing import Any
 
 import httpx
@@ -22,18 +27,12 @@ from third_party.mobile_use.utils.logger import get_logger
 logger = get_logger(__name__)
 _HTTP_CLIENT: httpx.AsyncClient | None = None
 
-# Provider selection via ARTEMIS_OCR_PROVIDER:
-#   "auto"     (default) - the local platform's vision-hybrid route first
-#                          (Apple Vision tier, VLM delegate when needed),
-#                          then Google Cloud Vision when an API key exists.
-#   "platform"           - vision-hybrid only.
-#   "google"             - Google Cloud Vision only.
-#   "apple"              - deprecated alias for "platform": the standalone
-#                          Apple Vision worker was removed; the platform's
-#                          oap-vision-bridge is the Apple Vision path now.
+# Provider selection via ARTEMIS_OCR_PROVIDER: "auto" (default) prefers
+# on-device Apple Vision on macOS and falls back to Google Cloud Vision when
+# an API key exists; "apple" / "google" pin a single provider.
 _OCR_PROVIDER_ENV = "ARTEMIS_OCR_PROVIDER"
-_OAP_API_BASE_ENV = "OAP_API_BASE"
-_OAP_OCR_MODEL_ENV = "OAP_OCR_MODEL"
+_APPLE_VISION_SUPPORTED: bool | None = None
+_APPLE_OCR_WORKER = Path(__file__).with_name("apple_vision_ocr.py")
 
 
 def get_http_client() -> httpx.AsyncClient:
@@ -45,6 +44,25 @@ def get_http_client() -> httpx.AsyncClient:
 
 def _ocr_provider() -> str:
     return os.environ.get(_OCR_PROVIDER_ENV, "auto").strip().lower()
+
+
+def _apple_vision_supported() -> bool:
+    """True on macOS when the pyobjc Vision bindings are importable and the
+    standalone worker script exists. The real OCR runs in a subprocess: once
+    cv2 is loaded in this process, VNRecognizeTextRequest intermittently
+    fails compiling its ANE compute stream (e5rt errors)."""
+    global _APPLE_VISION_SUPPORTED
+    if _APPLE_VISION_SUPPORTED is None:
+        if sys.platform != "darwin" or getattr(sys, "frozen", False):
+            _APPLE_VISION_SUPPORTED = False
+        else:
+            try:
+                import Vision  # noqa: F401
+
+                _APPLE_VISION_SUPPORTED = _APPLE_OCR_WORKER.is_file()
+            except ImportError:
+                _APPLE_VISION_SUPPORTED = False
+    return _APPLE_VISION_SUPPORTED
 
 
 def _google_vision_key() -> str | None:
@@ -74,63 +92,68 @@ def _google_vision_key_present() -> bool:
 
 
 def is_ocr_configured() -> bool:
-    """True when some OCR provider is usable: the local platform
-    vision-hybrid route (fixed loopback endpoint - reachability is a
-    runtime matter), or a configured Google Cloud Vision API key."""
+    """True when some OCR provider is usable: Apple Vision on macOS, or a
+    configured Google Cloud Vision API key."""
     provider = _ocr_provider()
-    if provider in ("auto", "platform", "apple"):
-        return True
+    if provider == "apple":
+        return _apple_vision_available()
     if provider == "google":
         return _google_vision_key_present()
-    return _google_vision_key_present()
+    return _apple_vision_available() or _google_vision_key_present()
 
 
-def _oap_ocr_endpoint() -> tuple[str, str]:
-    base = os.environ.get(
-        _OAP_API_BASE_ENV, "http://127.0.0.1:8080/v1"
-    ).rstrip("/")
-    return f"{base}/chat/completions", os.environ.get(
-        _OAP_OCR_MODEL_ENV, "vision-hybrid"
+# A failing Vision attempt can stall for minutes inside the ObjC call (e5rt
+# compute-stream compile), so every subprocess invocation is time-bounded and
+# retried once in a fresh interpreter before degrading. When the OS-level
+# Vision ML service is wedged, every call would burn 2x timeout forever —
+# after consecutive failures the provider is disabled until a success resets
+# the counter.
+_APPLE_OCR_TIMEOUT_S = float(os.environ.get("APPLE_OCR_TIMEOUT", "20"))
+_APPLE_OCR_MAX_CONSECUTIVE_FAILURES = 2
+_apple_vision_consecutive_failures = 0
+
+
+def _apple_vision_available() -> bool:
+    return (
+        _apple_vision_supported()
+        and _apple_vision_consecutive_failures < _APPLE_OCR_MAX_CONSECUTIVE_FAILURES
     )
 
 
-async def _run_platform_ocr(
-    screenshot_b64: str,
-    client: httpx.AsyncClient | None = None,
-) -> list[dict[str, Any]]:
-    """OCR via the local platform's vision-hybrid route (Apple Vision
-    first, VLM delegate when the image is not plain text extraction).
-    Structured observations arrive in the additive ``oap_ocr`` response
-    field as ``{text, confidence, position}`` with position already in
-    pixel vertices (TL,TR,BR,BL). An escalated VLM answer carries no
-    positions and yields ``[]`` - callers treat it like an empty OCR."""
-    url, model = _oap_ocr_endpoint()
-    payload = {
-        "model": model,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text",
-                 "text": "Extract all text from this image."},
-                {"type": "image_url",
-                 "image_url": {
-                     "url": "data:image/png;base64," + screenshot_b64}},
-            ],
-        }],
-    }
-    active_client = client if client is not None else get_http_client()
-    response = await active_client.post(url, json=payload, timeout=30.0)
-    response.raise_for_status()
-    results = []
-    for obs in response.json().get("oap_ocr") or []:
-        text = obs.get("text")
-        position = obs.get("position")
-        if (
-            isinstance(text, str)
-            and text.strip()
-            and isinstance(position, list)
-        ):
-            results.append({"text": text, "position": position})
+async def _apple_vision_subprocess(image_bytes: bytes) -> list[dict[str, Any]]:
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(_APPLE_OCR_WORKER),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(
+            proc.communicate(input=image_bytes), timeout=_APPLE_OCR_TIMEOUT_S
+        )
+    except BaseException:
+        proc.kill()
+        await proc.wait()
+        raise
+    if proc.returncode != 0:
+        tail = err.decode(errors="replace")[-300:] if err else ""
+        raise RuntimeError(f"Apple Vision worker exited {proc.returncode}: {tail}")
+    return json.loads(out or b"[]")
+
+
+async def _run_apple_vision(image_bytes: bytes) -> list[dict[str, Any]]:
+    global _apple_vision_consecutive_failures
+    try:
+        results = await _apple_vision_subprocess(image_bytes)
+    except Exception as e:
+        logger.warning(f"Apple Vision OCR attempt failed ({e}); retrying once")
+        try:
+            results = await _apple_vision_subprocess(image_bytes)
+        except Exception:
+            _apple_vision_consecutive_failures += 1
+            raise
+    _apple_vision_consecutive_failures = 0
     return results
 
 
@@ -140,10 +163,10 @@ async def perform_ocr(
 ) -> list[dict[str, Any]]:
     """Runs text recognition on an image with the selected provider.
 
-    Provider order under "auto": the local platform vision-hybrid route
-    first, then Google Cloud Vision when an API key is configured. An
-    empty platform result is authoritative - Google is only consulted
-    when the platform call itself fails (daemon absent/unreachable).
+    Provider order under "auto": Apple Vision on-device (macOS) first, then
+    Google Cloud Vision when an API key is configured. An empty Apple result
+    is authoritative — Google is only consulted when Apple Vision is
+    unavailable or raises.
 
     Args:
         screenshot_b64: Base64 encoded screenshot image.
@@ -153,19 +176,17 @@ async def perform_ocr(
         A list of dictionaries containing detected text and position vertices.
     """
     provider = _ocr_provider()
+    if provider in ("auto", "apple"):
+        if _apple_vision_available():
+            try:
+                return await _run_apple_vision(base64.b64decode(screenshot_b64))
+            except Exception as e:
+                logger.warning(f"Apple Vision OCR failed: {e}")
+        elif provider == "apple":
+            logger.warning("ARTEMIS_OCR_PROVIDER=apple but Apple Vision is unavailable")
+            return []
     if provider == "apple":
-        logger.warning(
-            "ARTEMIS_OCR_PROVIDER=apple is deprecated - the standalone "
-            "worker was removed; using the platform vision-hybrid route"
-        )
-    if provider in ("auto", "platform", "apple"):
-        try:
-            return await _run_platform_ocr(screenshot_b64, client)
-        except Exception as e:
-            if provider in ("platform", "apple"):
-                logger.warning(f"platform vision-hybrid OCR failed: {e}")
-                return []
-            logger.debug(f"platform vision-hybrid OCR unreachable: {e}")
+        return []
 
     api_key = _google_vision_key()
     if not api_key:
