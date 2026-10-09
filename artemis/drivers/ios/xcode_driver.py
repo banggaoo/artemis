@@ -203,13 +203,20 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
             # rejects newcomers with "already in use by ... key '<label>'". End
             # that orphan — the label works as the key — and retry once.
             match = _STALE_SESSION_RE.search(str(error))
-            if match is None:
-                raise
-            await self._bridge.call(
-                "DeviceInteractionEndSession",
-                {"interactionSessionKey": match.group(1)},
-            )
-            return await self._bridge.call("DeviceInteractionStartSession", start_arguments)
+            if match is not None:
+                await self._bridge.call(
+                    "DeviceInteractionEndSession",
+                    {"interactionSessionKey": match.group(1)},
+                )
+                return await self._bridge.call("DeviceInteractionStartSession", start_arguments)
+            if "currently in use or was recently used" in str(error):
+                # Xcode keeps a recently-used identifier reserved briefly;
+                # retry once with a fresh label after a short delay.
+                await asyncio.sleep(1.0)
+                start_arguments["sessionIdentifier"] = self._session_label()
+                return await self._bridge.call(
+                    "DeviceInteractionStartSession", start_arguments)
+            raise
 
     async def connect(self) -> None:
         async with self._connect_lock:
@@ -296,28 +303,62 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
         try:
             return await self._bridge.call("DeviceInteractionSynthesize", arguments)
         except RuntimeError as error:
-            # Xcode drops idle interaction sessions; "Session not found" means
-            # the command never ran, so restarting the session and retrying
-            # once cannot double-execute it.
-            if "session not found" not in str(error).casefold():
+            # Xcode drops idle interaction sessions, and a crashed mcpbridge
+            # fails in-flight calls with "MCP connection failed". Both mean
+            # the command never ran, so a session restart + retry cannot
+            # double-execute it.
+            message = str(error).casefold()
+            transient = (
+                "session not found" in message
+                or "mcp connection failed" in message
+                or "not connected" in message
+                or "invalid screen scale" in message
+            )
+            if not transient:
                 raise
+            logger.warning(
+                f"Xcode interaction channel dropped ({error}); reconnecting and retrying."
+            )
+            old_key, self._session_key = self._session_key, None
+            if old_key and self._bridge.connected:
+                try:
+                    await self._bridge.call(
+                        "DeviceInteractionEndSession",
+                        {"interactionSessionKey": old_key},
+                    )
+                except RuntimeError:
+                    pass
             await self._restart_interaction_session()
             arguments["interactSessionKey"] = self._session_key
             return await self._bridge.call("DeviceInteractionSynthesize", arguments)
 
     async def _restart_interaction_session(self) -> None:
-        """Replace the dropped Xcode interaction session in place."""
-        if not self._bridge.connected:
-            raise RuntimeError(
-                "Xcode MCP bridge is not connected; reconnect the driver before retrying."
-            )
-        session = await self._start_interaction_session()
-        key = session.get("interactionSessionKey")
-        if not key:
-            raise RuntimeError("Xcode did not return a device interaction session key.")
-        self._validate_session_device(session)
-        self._session_key = key
-        logger.warning("Re-established the Xcode interaction session after Xcode dropped it.")
+        """Replace the dropped Xcode interaction session, respawning the bridge."""
+        # Retry the whole reconnect: a respawned mcpbridge may report the old
+        # session identifier "recently used" for a moment, and the bridge
+        # itself can take a beat to accept stdio.
+        last_error: RuntimeError | None = None
+        for _ in range(3):
+            try:
+                if not self._bridge.connected:
+                    await self._bridge.start()
+                session = await self._start_interaction_session()
+                key = session.get("interactionSessionKey")
+                if not key:
+                    raise RuntimeError(
+                        "Xcode did not return a device interaction session key."
+                    )
+                self._validate_session_device(session)
+                self._session_key = key
+                logger.warning(
+                    "Re-established the Xcode interaction session after Xcode dropped it."
+                )
+                return
+            except RuntimeError as error:
+                last_error = error
+                logger.warning(f"Xcode interaction reconnect attempt failed: {error}")
+                await asyncio.sleep(1.0)
+        raise last_error or RuntimeError("Xcode interaction session could not be restarted.")
 
     def _require_connected(self) -> None:
         if not self._session_key or self._device_id.strip().lower() == BOOTED_SIMULATOR_ID:
