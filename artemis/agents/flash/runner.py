@@ -104,6 +104,16 @@ _NO_TOOL_CALL_NOTICE = (
     " action tool or 'report_task_status'."
 )
 
+_REPEATED_THOUGHT_NOTICE = (
+    "You returned the same response again without calling a tool. Do not repeat"
+    " reasoning — call an action tool or 'report_task_status' now."
+)
+
+#: Consecutive identical tool-less responses that mark a deterministic loop:
+#: at temperature zero a healthy model never repeats verbatim, so this many
+#: identical replies in a row mean the agent is stuck rather than reasoning.
+MAX_IDENTICAL_THOUGHT_TURNS = 3
+
 _FINAL_TURN_WARNING = "[WARNING] This is your final turn; only 'report_task_status' is available."
 
 
@@ -1059,6 +1069,8 @@ class FlashRunner:
         current_xml_list = xml_list
         previous_turn: _TurnRecord | None = None
         pending_notices: list[str] = []
+        last_thought = ""
+        identical_thoughts = 0
 
         while limit is None or turns < limit:
             turns += 1
@@ -1134,12 +1146,33 @@ class FlashRunner:
                 if is_final:
                     final_report = {"status": "failed", "explanation": raw_text}
                     break
-                pending_notices.append(_NO_TOOL_CALL_NOTICE)
+                thought = " ".join((raw_text or native_text).split()) or "<empty>"
+                if thought == last_thought:
+                    identical_thoughts += 1
+                else:
+                    identical_thoughts = 0
+                last_thought = thought
+                if identical_thoughts + 1 >= MAX_IDENTICAL_THOUGHT_TURNS:
+                    final_report = {
+                        "status": "failed",
+                        "explanation": (
+                            f"The model returned the identical response"
+                            f" {identical_thoughts + 1} turns in a row without calling"
+                            " a tool; the run is stalled rather than reasoning."
+                            f" Last response: {raw_text[:200]}"
+                        ),
+                    }
+                    break
+                pending_notices.append(
+                    _REPEATED_THOUGHT_NOTICE if identical_thoughts else _NO_TOOL_CALL_NOTICE
+                )
                 ledger.stage_turn(messages[turn_base:])
                 previous_turn = _TurnRecord()
                 continue
 
             # Process tool calls
+            last_thought = ""
+            identical_thoughts = 0
             turn = _TurnRecord()
             (
                 final_report_from_calls,
