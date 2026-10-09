@@ -21,9 +21,11 @@ exit; restart gaps stay gaps in rendered clips.
 """
 
 import asyncio
+import os
 from pathlib import Path
 import re
 import signal
+import subprocess
 import tempfile
 import time
 from typing import Any
@@ -48,6 +50,7 @@ STARTUP_TIMEOUT_SECONDS = 30.0
 SIGINT_FLUSH_TIMEOUT_SECONDS = 10.0
 TERMINATE_TIMEOUT_SECONDS = 3.0
 PROBES_TIMEOUT_SECONDS = 3.0
+STALE_RECORDER_GRACE_SECONDS = 3.0
 SEGMENT_PROBE_TIMEOUT_SECONDS = 30.0
 FFMPEG_TIMEOUT_SECONDS = 120.0
 WATCHDOG_INTERVAL_SECONDS = 0.5
@@ -265,9 +268,11 @@ class IosScreenRecorder:
                 line = await process.stderr.readline()
                 if not line:
                     if not first_frame.done():
+                        tail = "; ".join(session.stderr_lines[-3:])
                         first_frame.set_exception(
                             RuntimeError(
-                                "simctl recordVideo closed stderr before 'Recording started'"
+                                "simctl recordVideo exited before 'Recording started'"
+                                + (f": {tail}" if tail else "")
                             )
                         )
                     return
@@ -282,6 +287,58 @@ class IosScreenRecorder:
         except Exception as exc:
             if not first_frame.done():
                 first_frame.set_exception(exc)
+
+    async def _reap_stale_recorders(self, *, any_device: bool = False) -> list[int]:
+        """SIGINT orphaned ``simctl recordVideo`` processes still holding the host lock.
+
+        ``recordVideo``'s "Host recording is already in progress" lock is shared
+        host-wide, not per-device, so a recorder orphaned by a session that ended
+        without reaping it (a killed task or console) blocks every later spawn —
+        on this device or a sibling simulator. SIGINT lets the orphan flush its
+        ``.mov``; a survivor is escalated to SIGKILL.
+        """
+        if any_device:
+            pattern = r"simctl io [0-9A-Fa-f-]+ recordVideo"
+        else:
+            pattern = f"simctl io {self._device_id} recordVideo"
+        try:
+            probe = await asyncio.to_thread(
+                subprocess.run,
+                ["pgrep", "-f", pattern],
+                capture_output=True,
+                text=True,
+                timeout=PROBES_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return []
+        pids = [int(token) for token in probe.stdout.split() if token.isdigit()]
+        reaped: list[int] = []
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGINT)
+            except (ProcessLookupError, PermissionError):
+                continue
+            reaped.append(pid)
+        if not reaped:
+            return []
+        logger.warning(
+            f"Reaping {len(reaped)} stale simctl recordVideo process(es) on "
+            f"{self._device_id}: {reaped}"
+        )
+        deadline = time.monotonic() + STALE_RECORDER_GRACE_SECONDS
+        for pid in reaped:
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        return reaped
 
     async def _reap(self, process: asyncio.subprocess.Process) -> float:
         """SIGINT to flush, escalate to terminate/kill; returns end monotonic."""
@@ -310,6 +367,19 @@ class IosScreenRecorder:
 
     async def _spawn_recorder(self, session: IosRecordingSession) -> None:
         """Spawn simctl recordVideo and anchor at its first-frame marker."""
+        await self._reap_stale_recorders()
+        try:
+            await self._spawn_once(session)
+        except RuntimeError as exc:
+            # The host recording lock is shared across simulators, so an orphan
+            # on a different UDID can still be the contender; sweep all stale
+            # recorders and give the spawn one more chance.
+            if "already in progress" not in str(exc):
+                raise
+            await self._reap_stale_recorders(any_device=True)
+            await self._spawn_once(session)
+
+    async def _spawn_once(self, session: IosRecordingSession) -> None:
         index = session.segment_index
         source_path = self._segment_source_path(session, index)
         process = await asyncio.create_subprocess_exec(

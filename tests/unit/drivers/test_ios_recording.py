@@ -207,6 +207,101 @@ async def test_stderr_eof_before_marker_fails(recorder_env, monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_stderr_eof_error_reports_simctl_reason(recorder_env, monkeypatch, tmp_path):
+    stderr = FakeStderr(
+        lines=[b"Error starting video recorder: Host recording is already in progress\n"],
+        eof=True,
+    )
+    patch_spawn(monkeypatch, [FakeRecorderProcess(stderr)])
+    recorder = IosScreenRecorder(UDID)
+
+    with pytest.raises(RuntimeError, match="already in progress"):
+        await recorder.start(output_dir=tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_stale_recorders_are_siginted_before_spawn(recorder_env, monkeypatch, tmp_path):
+    """An orphaned recordVideo on the same UDID is stopped before spawning."""
+    kills: list[tuple[int, int]] = []
+    exited: set[int] = set()
+
+    def fake_kill(pid, sig):
+        kills.append((pid, sig))
+        if sig == signal.SIGINT:
+            exited.add(pid)
+        elif sig == 0 and pid in exited:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(rec.os, "kill", fake_kill)
+    monkeypatch.setattr(
+        rec.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="4321\n", returncode=0),
+    )
+    created = patch_spawn(monkeypatch, [FakeRecorderProcess()])
+    recorder = IosScreenRecorder(UDID)
+
+    session = await recorder.start(output_dir=tmp_path)
+
+    assert (4321, signal.SIGINT) in kills
+    # pgrep goes through subprocess.run, so the first spawned child is still
+    # the xcrun recordVideo invocation itself.
+    assert created[0][:4] == ("xcrun", "simctl", "io", UDID)
+    assert session.is_active
+    await recorder.stop()
+
+
+@pytest.mark.asyncio
+async def test_busy_spawn_reaps_cross_device_orphan_and_retries(
+    recorder_env, monkeypatch, tmp_path
+):
+    """A recorder on a sibling UDID holds the host lock: sweep all, retry once."""
+    kills: list[tuple[int, int]] = []
+    exited: set[int] = set()
+
+    def fake_kill(pid, sig):
+        kills.append((pid, sig))
+        if sig == signal.SIGINT:
+            exited.add(pid)
+        elif sig == 0 and pid in exited:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(rec.os, "kill", fake_kill)
+    pgrep_results = iter(
+        [
+            "",  # pre-spawn sweep: no same-UDID recorder
+            "9999\n",  # busy-retry sweep: a sibling device's orphan
+        ]
+    )
+    pgrep_patterns: list[str] = []
+    monkeypatch.setattr(
+        rec.subprocess,
+        "run",
+        lambda argv, **kwargs: (
+            pgrep_patterns.append(argv[2])
+            or SimpleNamespace(stdout=next(pgrep_results, ""), returncode=0)
+        ),
+    )
+    busy = FakeRecorderProcess(
+        FakeStderr(
+            lines=[b"Error starting video recorder: Host recording is already in progress\n"],
+            eof=True,
+        )
+    )
+    healthy = FakeRecorderProcess()
+    created = patch_spawn(monkeypatch, [busy, healthy])
+    recorder = IosScreenRecorder(UDID)
+
+    session = await recorder.start(output_dir=tmp_path)
+
+    assert (9999, signal.SIGINT) in kills
+    assert any("recordVideo" in p and UDID not in p for p in pgrep_patterns)
+    assert sum("recordVideo" in " ".join(argv) for argv in created) == 2
+    assert session.is_active and session.process is healthy
+    await recorder.stop()
+
+
+@pytest.mark.asyncio
 async def test_startup_cancellation_reaps_child(recorder_env, monkeypatch, tmp_path):
     proc = FakeRecorderProcess(FakeStderr(lines=[]))  # marker never arrives
     patch_spawn(monkeypatch, [proc])
