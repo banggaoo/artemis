@@ -955,3 +955,87 @@ async def test_exact_simulator_name_resolves_to_its_udid(simulator):
     await simulator.driver.connect()
     assert simulator.driver.device_id == IOS_A
     await simulator.driver.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_dropped_interaction_session_restarts_and_retries_once(simulator):
+    """Xcode drops idle interaction sessions; a "Session not found" reply means
+    the command never ran, so the driver re-opens the session and retries."""
+    driver = simulator.driver
+    await driver.connect()
+
+    calls = []
+
+    async def session_loss(arguments):
+        calls.append(arguments)
+        if len(calls) == 1:
+            raise RuntimeError(
+                'Xcode tool DeviceInteractionSynthesize failed: {"type":"error",'
+                '"data":"Session not found. It may have already been closed, '
+                'or the identifier is wrong"}'
+            )
+        return {"userMessage": "ok"}
+
+    simulator.native.hooks["DeviceInteractionSynthesize"] = session_loss
+    simulator.native.start_result = {
+        "interactionSessionKey": "fresh-session",
+        "deviceUUID": IOS_A,
+        "deviceIsSimulator": True,
+    }
+
+    assert await driver.press_key("home") is True
+    # The retry must run under the new session key, not the dropped one.
+    assert calls[1]["interactSessionKey"] == "fresh-session"
+    starts = [
+        c for c in simulator.native.call.await_args_list if c.args[0].endswith("StartSession")
+    ]
+    assert len(starts) == 2
+    await driver.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_dropped_session_restart_failure_does_not_retry_forever(simulator):
+    driver = simulator.driver
+    await driver.connect()
+
+    async def always_lost(arguments):
+        raise RuntimeError("Session not found")
+
+    simulator.native.hooks["DeviceInteractionSynthesize"] = always_lost
+    simulator.native.start_result = {
+        "interactionSessionKey": "fresh-session",
+        "deviceUUID": IOS_A,
+        "deviceIsSimulator": True,
+    }
+
+    with pytest.raises(RuntimeError, match="Session not found"):
+        await driver.press_key("home")
+    starts = [
+        c for c in simulator.native.call.await_args_list if c.args[0].endswith("StartSession")
+    ]
+    assert len(starts) == 2
+    await driver.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_orphaned_native_session_is_ended_and_start_retried(simulator):
+    """A crashed runner leaves an interaction session behind; the next connect
+    ends the reported orphan and retries instead of failing."""
+    calls = []
+
+    async def busy_once(arguments):
+        calls.append(arguments)
+        if len(calls) == 1:
+            raise RuntimeError(
+                "The target device is already in use by a different session "
+                "with key 'Artemis Simulator deadbeef'. If that session is no "
+                "longer needed, stop it first and retry."
+            )
+        return simulator.native.start_result
+
+    simulator.native.hooks["DeviceInteractionStartSession"] = busy_once
+    await simulator.driver.connect()
+    ends = [c for c in simulator.native.call.await_args_list if c.args[0].endswith("EndSession")]
+    assert ends[0].args[1] == {"interactionSessionKey": "Artemis Simulator deadbeef"}
+    assert len([c for c in calls]) == 2
+    await simulator.driver.disconnect()

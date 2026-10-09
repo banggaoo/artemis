@@ -101,3 +101,34 @@ def test_shared_formatter_keeps_android_centroid_for_missing_or_invalid_native_p
     assert elements[0]["resource_id"] == "android:id/button1"
     assert "hit_point" not in elements[0]
     assert ScreenIndex.from_hierarchy([node], 800, 1600).elements[0].center == (260, 430)
+
+
+@pytest.mark.asyncio
+async def test_ios_input_text_clear_exist_degrades_to_typing_with_honest_note(
+    tmp_path, monkeypatch
+):
+    """iOS cannot whole-field clear; the actuator still types after focusing
+    and reports the degradation instead of hard-failing the action."""
+    screenshot = tmp_path / "native.png"
+    Image.new("RGB", (800, 1600)).save(screenshot)
+    hierarchy = tmp_path / "native.txt"
+    hierarchy.write_text(HIERARCHY)
+    driver = XcodeSimulatorDriver("simulator-id")
+    driver._session_key = "session"
+    driver._bridge = SimpleNamespace(
+        call=AsyncMock(
+            return_value={"screenshotPath": str(screenshot), "hierarchyPath": str(hierarchy)}
+        )
+    )
+    context = ArtemisContext(
+        device=DeviceContext(mobile_platform=DevicePlatform.IOS, device_id="simulator-id")
+    )
+    context._active_driver = driver
+    actuator = IosActuator(context)
+    monkeypatch.setattr("artemis.mcp.observation.get_temp_dir", lambda name: tmp_path)
+
+    result = await actuator.input_text("apple.com", (500, 300), clear_exist=True)
+    assert result.ok
+    assert "without clearing" in result.message
+    typed = driver._bridge.call.await_args.args[1]["interactionCommand"]
+    assert typed.startswith("sender keyboard kbd")
