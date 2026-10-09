@@ -9,8 +9,8 @@
   "default": {
     "provider": "custom",
     // gemma4-e4b via ondevice-agent-platform (mlx-vlm gemma4 route);
-    // vision nodes use vision-hybrid (Apple Vision OCR first, escalates
-    // to qwen-vl only when OCR cannot answer), qwen3.8-9b fallback.
+    // vision nodes use gemma4-e4b (semantic/grounding); vision-hybrid
+    // is the OCR-only route (Apple Vision first, qwen-vl escalation).
     "model": "gemma4-e4b",
     "api_base": "http://127.0.0.1:8080/v1",
     // Local 9B reasoning runs ~15-30 tok/s with a thinking preamble;
@@ -68,7 +68,7 @@
     // MUST stay on a vision-capable model — it consumes the screenshot every
     // turn; the platform hard-rejects image parts on text-only models (400).
     "operator": {
-      "model": "vision-hybrid",
+      "model": "gemma4-e4b",
       "thinking_level": "medium",
       "include_thoughts": true,
       "fallback": {
@@ -83,7 +83,7 @@
     // qwen-vl (native Gemini Files API path only exists for google provider).
     "video_analyzer": {
       "provider": "custom",
-      "model": "vision-hybrid",
+      "model": "gemma4-e4b",
       "api_base": "http://127.0.0.1:8080/v1",
       "fallback": {
         "provider": "custom",
@@ -93,13 +93,15 @@
     },
 
     // 👁️ Object Detector & Explorer (Flash Mode): Visual coordinates grounding and bounding boxes
-    // Local Qwen3-VL via ondevice-agent-platform (OpenAI-compatible :8080).
-    // Verified on-device: qwen-vl emits [x, y] on the 0-1000 grid matching the
+    // Local gemma4-e4b via ondevice-agent-platform (OpenAI-compatible :8080).
+    // grounding grid verified on qwen-vl (kept as fallback); gemma grid output
+    // is plausible on synthetic input but NOT verified on real UIs yet.
+    // Previously verified on-device: qwen-vl emits [x, y] on the 0-1000 grid matching the
     // detector contract; "xy_1000" only fixes the axis order vs Gemini ER's
     // [y, x]. Off-contract batches still auto-rescale (0-1 or raw pixels).
     "object_detector": {
       "provider": "custom",
-      "model": "vision-hybrid",
+      "model": "gemma4-e4b",
       "api_base": "http://127.0.0.1:8080/v1",
       "coordinate_format": "xy_1000",
       "timeout": 300,
@@ -118,7 +120,7 @@
     //  - "pro" / "ultra" versions run multi-turn ReAct loops (supports both Native Gemini and Universal Multi-Model LangChain engines).
     // pro/ultra tiers consume screenshots directly — must be vision-capable.
     "explorer": {
-      "model": "vision-hybrid",
+      "model": "gemma4-e4b",
       "thinking_level": "medium",
       "fallback": {
         "provider": "custom",
