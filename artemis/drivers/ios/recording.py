@@ -52,7 +52,10 @@ TERMINATE_TIMEOUT_SECONDS = 3.0
 PROBES_TIMEOUT_SECONDS = 3.0
 STALE_RECORDER_GRACE_SECONDS = 3.0
 SEGMENT_PROBE_TIMEOUT_SECONDS = 30.0
-FFMPEG_TIMEOUT_SECONDS = 120.0
+# Finalization re-encodes the whole capture, so the budget scales with the
+# segment's wall span: encode on a loaded host can run slower than realtime.
+FFMPEG_TIMEOUT_SECONDS = 180.0
+FFMPEG_TIMEOUT_PER_SPAN_SECOND = 2.0
 WATCHDOG_INTERVAL_SECONDS = 0.5
 MAX_CONSECUTIVE_FAILURES = 3
 MIN_HEALTHY_SEGMENT_SECONDS = 10.0
@@ -181,7 +184,8 @@ async def finalize_mov_to_mp4(
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            _stdout, stderr = await asyncio.wait_for(process.communicate(), FFMPEG_TIMEOUT_SECONDS)
+            timeout = max(FFMPEG_TIMEOUT_SECONDS, span * FFMPEG_TIMEOUT_PER_SPAN_SECOND)
+            _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
             metadata = await probe_video_segment(
                 temporary_path, timeout_seconds=SEGMENT_PROBE_TIMEOUT_SECONDS
             )
