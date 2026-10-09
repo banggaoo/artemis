@@ -66,7 +66,7 @@ from artemis.data_engine.trace import DataEngineCallbackHandler
 from artemis.graph.graph import get_graph
 from artemis.graph.state import State
 from artemis.runtime import DeviceExecutionLock
-from artemis.runtime.adb_endpoint import IOS_LOCK_SCOPE
+from artemis.runtime.device_target import IOS_LOCK_SCOPE
 from artemis.sdk.run_outcome import attach_test_summary, resolve_trace_suffix
 from artemis.sdk.types.agent import AgentConfig
 from artemis.utils.startup_progress import publish_startup_progress

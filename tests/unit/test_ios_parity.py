@@ -29,7 +29,8 @@ from artemis.drivers.ios.discovery import (
     list_ios_simulators_sync,
     parse_simctl_devices,
 )
-from artemis.runtime.adb_endpoint import AdbEndpoint, AdbTarget, IOS_LOCK_SCOPE, IosTarget
+from artemis.runtime.adb_endpoint import AdbEndpoint
+from artemis.runtime.device_target import IOS_LOCK_SCOPE, AdbTarget, IosTarget
 from artemis.runtime.device_lock import DeviceExecutionLock, DeviceLockOwner
 from artemis.runtime.ios_device_pool import IosDevicePool
 

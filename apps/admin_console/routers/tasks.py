@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from artemis.core.diagnostics import readiness_engine
 from artemis.runtime import DeviceExecutionLock, device_pool, ios_device_pool
-from artemis.runtime.adb_endpoint import (
+from artemis.runtime.device_target import (
     IOS_LOCK_SCOPE,
     device_pool_for,
     normalize_device_platform,

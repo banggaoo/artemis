@@ -33,7 +33,7 @@ from artemis.drivers.ios.discovery import (
     list_ios_simulators_sync,
     physical_ios_ready,
 )
-from artemis.runtime.adb_endpoint import IOS_LOCK_SCOPE
+from artemis.runtime.device_target import IOS_LOCK_SCOPE
 from artemis.runtime.device_lock import DeviceExecutionLock
 from artemis.runtime.device_pool import DeviceStatus
 from third_party.mobile_use.utils.logger import get_logger

@@ -25,7 +25,7 @@ import asyncio
 from typing import Any
 
 from artemis.controllers.device_controller import ScreenDataResponse
-from artemis.runtime.adb_endpoint import IOS_LOCK_SCOPE
+from artemis.runtime.device_target import IOS_LOCK_SCOPE
 from artemis.runtime.device_lock import DeviceExecutionLock
 from third_party.mobile_use.utils.logger import get_logger
 

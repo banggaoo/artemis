@@ -52,7 +52,7 @@ from artemis.runtime import (
     request_cancel,
     trace_store,
 )
-from artemis.runtime.adb_endpoint import (
+from artemis.runtime.device_target import (
     IOS_LOCK_SCOPE,
     IosTarget,
     device_pool_for,
@@ -1057,7 +1057,9 @@ class TaskQueueService:
             "locked_app_package": locked_app_package,
             "app_path": app_path,
             "device_serial": assigned_serial,
-            "adb_endpoint": endpoint.to_dict(),
+            # iOS targets have no endpoint; serialize None rather than leaking
+            # the caller's ADB preference into the task snapshot.
+            "adb_endpoint": endpoint.to_dict() if platform != "ios" else None,
             "platform": platform,
             "ios_workspace": ios_workspace,
             "ingress": ingress,

@@ -28,7 +28,7 @@ from artemis.core.diagnostics.adb_server_connection import (
     adb_server_connection,
 )
 from artemis.core.diagnostics.schema import SystemReadinessReport
-from artemis.runtime.adb_endpoint import normalize_device_platform
+from artemis.runtime.device_target import normalize_device_platform
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 

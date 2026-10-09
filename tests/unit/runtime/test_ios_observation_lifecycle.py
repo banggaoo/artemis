@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from artemis.runtime.adb_endpoint import IOS_LOCK_SCOPE
+from artemis.runtime.device_target import IOS_LOCK_SCOPE
 from artemis.runtime.device_lock import DeviceBusyError, DeviceExecutionLock
 from artemis.runtime.ios_observation import observe_ios_controller
 
