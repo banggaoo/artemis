@@ -162,6 +162,17 @@ class LocalModelEndpointProbe(BaseProbe):
                             payload=f"{_OAP_BIN} model pull --alias {alias}",
                         )
                     )
+                    missing_actions.append(
+                        ProbeAction(
+                            action_type="hint",
+                            label=f"Other servers",
+                            payload=(
+                                f"If '{base}' is not the ondevice-agent-platform, "
+                                f"install '{alias}' with that server's pull command "
+                                f"(e.g. `ollama pull`) so it appears in GET {base}/models."
+                            ),
+                        )
+                    )
 
         unreachable = [r for r in reports if not r.get("reachable")]
         with_missing = [r for r in reports if r.get("missing")]
