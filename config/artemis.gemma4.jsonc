@@ -3,7 +3,7 @@
   // ☕ ARTEMIS Autonomous Agent & Framework Configuration — GEMMA 4 SPIKE
   // ==============================================================================
   // Single-model deployment: every node (reasoning + vision + grounding) resolves
-  // to one gemma4-e4b endpoint on the ondevice-agent-platform server.
+  // to one gemma4-e4b endpoint on the local OpenAI-compatible model server.
   //
   // ACTIVATION (pick one):
   //   export ARTEMIS_ARTEMIS_JSONC=config/artemis.gemma4.jsonc
@@ -68,8 +68,8 @@
       "model": "llama3.2-vision",
       "fallback": { "provider": "openai", "model": "llama3.2-vision" }
     },
-    // Unified single-model route via ondevice-agent-platform (OpenAI-compatible).
-    "ondevice-gemma4": {
+    // Unified single-model route via a local OpenAI-compatible server.
+    "local-gemma4": {
       "provider": "custom",
       "model": "gemma4-e4b",
       "api_base": "http://127.0.0.1:8080/v1",
@@ -153,7 +153,7 @@
       // replacing images only after strictly objective, high-density summaries are ready.
       // LOCAL-MODEL NOTE: the visual-transition lens bypasses the LLM router
       // (get_google_llm) — with no GOOGLE_API_KEY it crashes runner init.
-      // Disabled for the ondevice-platform deployment.
+      // Disabled for the local-provider deployment.
       "step_summarizer": {
         "enabled": false, // Whether background step summarization is active
         "model": "gemini-3.5-flash-lite", // Lightweight model for fast background inference
@@ -218,7 +218,7 @@
         // flag). See services/token_meter.py for measured session token usage
         // and cache-hit ratios.
         // LOCAL-MODEL NOTE: transcript + capsule lens are Google-bound
-        // (get_google_llm) — disabled under the ondevice-platform deployment.
+        // (get_google_llm) — disabled under the local-provider deployment.
         "enabled": false,
         "context_budget_tokens": 80000,
         // Below start_ratio of the operator's own measured prompt size, closed

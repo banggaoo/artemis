@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Endpoint plumbing for local OpenAI-compatible providers (e.g. ondevice-agent-platform)."""
+"""Endpoint plumbing for local OpenAI-compatible providers (e.g. a local OpenAI-compatible server)."""
 
 from types import SimpleNamespace
 

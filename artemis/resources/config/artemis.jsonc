@@ -46,10 +46,10 @@
       "model": "llama3.2-vision",
       "fallback": { "provider": "openai", "model": "llama3.2-vision" }
     },
-    // Fully local route via ondevice-agent-platform (OpenAI-compatible).
+    // Fully local route via a local OpenAI-compatible server.
     // Copy the provider/model/api_base keys into "default" or a node below;
     // "custom" skips cloud credential checks and needs no API key.
-    "ondevice-qwen": {
+    "local-qwen": {
       "provider": "custom",
       "model": "qwen3.8-9b",
       "api_base": "http://127.0.0.1:8080/v1",
@@ -87,7 +87,7 @@
     // CRITICAL REQUIREMENT: Standard LLMs (including standard Gemini Flash, GPT-4o, Claude 3.7) lack sub-pixel spatial coordinate fine-tuning.
     // To achieve accurate [x, y] point and bounding box localization, this node MUST use specialized Gemini ER (Embodied Reasoning / Robotics) models:
     // e.g., "gemini-robotics-er-2-preview". Non-ER models will fail spatial coordinate detection.
-    // For a local vision model (e.g. qwen-vl via ondevice-agent-platform) also set
+    // For a local vision model (e.g. qwen-vl via a local server) also set
     // "coordinate_format" — detector points are normalized to [x, y] 0-1000:
     //   "yx_1000" (default, Gemini ER) | "xy_1000" (Qwen-VL verified) |
     //   "xy_px"/"yx_px" (absolute pixels of the processed image grid) |

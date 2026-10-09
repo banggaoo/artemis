@@ -9,29 +9,22 @@ Tested reference setup: **Gemma 4 E4B (4-bit, MLX)** on Apple Silicon —
 end-to-end on a real device.
 
 Any server that speaks `/v1/chat/completions` (text + `image_url` + tool
-calls) works the same way: `ondevice-agent-platform`, `mlx_lm.server`,
-Ollama, LM Studio, llama.cpp, vLLM, …
+calls) works the same way: `mlx_lm.server`, Ollama, LM Studio, llama.cpp,
+vLLM, …
 
 ## 1. Install a model server
 
-Pick one. The `ondevice-agent-platform` route is the tested path and is what
-the readiness probe's remediation hints assume.
+Pick one. Anything exposing the OpenAI chat-completions API with vision and
+tool-call support qualifies.
 
-**ondevice-agent-platform (reference)**
-
-```bash
-# provides the `ondevice-agent-platform` CLI on PATH
-ondevice-agent-platform serve --port 8080
-```
-
-**Generic alternative — MLX (Apple Silicon)**
+**MLX (Apple Silicon)**
 
 ```bash
 pip install mlx-lm
 mlx_lm.server --model mlx-community/gemma-4-E4B-it-4bit --port 8080
 ```
 
-**Generic alternative — Ollama**
+**Ollama**
 
 ```bash
 ollama serve   # listens on :11434; use api_base http://127.0.0.1:11434/v1
@@ -40,9 +33,6 @@ ollama serve   # listens on :11434; use api_base http://127.0.0.1:11434/v1
 ## 2. Pull the model
 
 ```bash
-# ondevice-agent-platform
-ondevice-agent-platform model pull --alias gemma4-e4b
-
 # Ollama
 ollama pull gemma3:4b
 ```
@@ -85,8 +75,9 @@ The **Local Model Endpoint** probe checks the endpoint is reachable and that
 every configured alias is actually served:
 
 - ✅ `Serving N model(s)` — ready
-- ❌ `model 'X' not installed` → suggests `ondevice-agent-platform model pull --alias X`
-- ❌ `endpoint unreachable` → suggests `ondevice-agent-platform serve`
+- ❌ `model 'X' not installed` → hint: install `X` with your server's pull
+  command so it appears in `GET {api_base}/models`
+- ❌ `endpoint unreachable` → hint: start the server bound to that base
 
 The same probe backs the web console's setup wizard and `mobile_diagnose`.
 

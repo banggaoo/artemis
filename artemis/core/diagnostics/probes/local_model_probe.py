@@ -14,11 +14,12 @@
 
 """Local Model Endpoint Readiness Probe.
 
-When artemis.jsonc routes nodes to a ``custom`` provider (the local
-ondevice-agent-platform at ``api_base``), every configured model alias must
-actually be pulled and served there. This probe verifies the endpoint is
-reachable and that each required model appears in ``GET {api_base}/models``,
-guiding the user through ``model pull`` / ``serve`` when it does not.
+When artemis.jsonc routes nodes to a ``custom`` provider (a local
+OpenAI-compatible model server at ``api_base``), every configured model
+alias must actually be pulled and served there. This probe verifies the
+endpoint is reachable and that each required model appears in
+``GET {api_base}/models``, guiding the user through model installation or
+server startup when it does not.
 """
 
 from typing import Any
@@ -38,7 +39,6 @@ from third_party.mobile_use.utils.logger import get_logger
 logger = get_logger(__name__)
 
 _PROBE_HTTP_TIMEOUT_S = 5.0
-_OAP_BIN = "ondevice-agent-platform"
 
 
 def _iter_configured_llms() -> list[LLM]:
@@ -137,9 +137,13 @@ class LocalModelEndpointProbe(BaseProbe):
                     worst_summary = f"{base} unreachable"
                     missing_actions.append(
                         ProbeAction(
-                            action_type="command",
+                            action_type="hint",
                             label="Start Model Server",
-                            payload=f"{_OAP_BIN} serve",
+                            payload=(
+                                f"Start the OpenAI-compatible server bound to {base} "
+                                f"(e.g. `ollama serve`, `mlx_lm.server`, or your platform's "
+                                f"serve command)."
+                            ),
                         )
                     )
                     continue
@@ -157,19 +161,12 @@ class LocalModelEndpointProbe(BaseProbe):
                     worst_summary = f"model '{alias}' not installed"
                     missing_actions.append(
                         ProbeAction(
-                            action_type="command",
-                            label=f"Pull {alias}",
-                            payload=f"{_OAP_BIN} model pull --alias {alias}",
-                        )
-                    )
-                    missing_actions.append(
-                        ProbeAction(
                             action_type="hint",
-                            label=f"Other servers",
+                            label=f"Pull {alias}",
                             payload=(
-                                f"If '{base}' is not the ondevice-agent-platform, "
-                                f"install '{alias}' with that server's pull command "
-                                f"(e.g. `ollama pull`) so it appears in GET {base}/models."
+                                f"Install '{alias}' with the model server's pull command "
+                                f"(e.g. `ollama pull {alias}`) so it appears in "
+                                f"GET {base}/models."
                             ),
                         )
                     )

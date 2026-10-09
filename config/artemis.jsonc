@@ -8,7 +8,7 @@
   // ------------------------------------------------------------------------------
   "default": {
     "provider": "custom",
-    // gemma4-e4b via ondevice-agent-platform (mlx-vlm gemma4 route);
+    // gemma4-e4b via a local OpenAI-compatible model server (mlx-vlm gemma4 route);
     // vision nodes use gemma4-e4b (semantic/grounding); vision-hybrid
     // is the OCR-only route (Apple Vision first, qwen-vl escalation).
     "model": "gemma4-e4b",
@@ -93,7 +93,7 @@
     },
 
     // 👁️ Object Detector & Explorer (Flash Mode): Visual coordinates grounding and bounding boxes
-    // Local gemma4-e4b via ondevice-agent-platform (OpenAI-compatible :8080).
+    // Local gemma4-e4b via a local OpenAI-compatible model server.
     // grounding verified on synthetic UI: gemma4-e4b emits box_2d as
     // [ymin,xmin,ymax,xmax]/1000 = the detector's native yx_1000 contract
     // (pixel-accurate on a settings-screen mock; real-UI eval still pending).
@@ -181,7 +181,7 @@
       // replacing images only after strictly objective, high-density summaries are ready.
       // LOCAL-MODEL NOTE: the visual-transition lens bypasses the LLM router
       // (get_google_llm) — with no GOOGLE_API_KEY it crashes runner init.
-      // Disabled for the ondevice-platform deployment.
+      // Disabled for the local-provider deployment.
       "step_summarizer": {
         "enabled": false, // Whether background step summarization is active
         "model": "gemini-3.5-flash-lite", // Lightweight model for fast background inference
@@ -246,7 +246,7 @@
         // flag). See services/token_meter.py for measured session token usage
         // and cache-hit ratios.
         // LOCAL-MODEL NOTE: transcript + capsule lens are Google-bound
-        // (get_google_llm) — disabled under the ondevice-platform deployment.
+        // (get_google_llm) — disabled under the local-provider deployment.
         "enabled": false,
         "context_budget_tokens": 80000,
         // Below start_ratio of the operator's own measured prompt size, closed
