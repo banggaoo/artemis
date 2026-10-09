@@ -114,6 +114,12 @@ _REPEATED_THOUGHT_NOTICE = (
 #: identical replies in a row mean the agent is stuck rather than reasoning.
 MAX_IDENTICAL_THOUGHT_TURNS = 3
 
+#: Consecutive tool-less turns regardless of content. Paraphrased repetition
+#: (the same plan re-stated with different wording) evades the identical-text
+#: guard, so a plain streak cap is the backstop — healthy runs interleave
+#: occasional thinking turns with actions, never this many in a row.
+MAX_SILENT_TURN_STREAK = 8
+
 _FINAL_TURN_WARNING = "[WARNING] This is your final turn; only 'report_task_status' is available."
 
 
@@ -1071,6 +1077,7 @@ class FlashRunner:
         pending_notices: list[str] = []
         last_thought = ""
         identical_thoughts = 0
+        silent_turns = 0
 
         while limit is None or turns < limit:
             turns += 1
@@ -1152,6 +1159,7 @@ class FlashRunner:
                 else:
                     identical_thoughts = 0
                 last_thought = thought
+                silent_turns += 1
                 if identical_thoughts + 1 >= MAX_IDENTICAL_THOUGHT_TURNS:
                     final_report = {
                         "status": "failed",
@@ -1160,6 +1168,16 @@ class FlashRunner:
                             f" {identical_thoughts + 1} turns in a row without calling"
                             " a tool; the run is stalled rather than reasoning."
                             f" Last response: {raw_text[:200]}"
+                        ),
+                    }
+                    break
+                if silent_turns >= MAX_SILENT_TURN_STREAK:
+                    final_report = {
+                        "status": "failed",
+                        "explanation": (
+                            f"The model produced {silent_turns} consecutive turns"
+                            " without calling a tool; the run is stalled rather"
+                            f" than reasoning. Last response: {raw_text[:200]}"
                         ),
                     }
                     break
@@ -1173,6 +1191,7 @@ class FlashRunner:
             # Process tool calls
             last_thought = ""
             identical_thoughts = 0
+            silent_turns = 0
             turn = _TurnRecord()
             (
                 final_report_from_calls,
