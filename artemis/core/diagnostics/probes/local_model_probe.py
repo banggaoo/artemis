@@ -23,9 +23,11 @@ server startup when it does not.
 """
 
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
+from artemis.config.local_models import resolve_model_ref
 from artemis.core.diagnostics.probes.base import BaseProbe
 from artemis.core.diagnostics.schema import (
     ProbeAction,
@@ -135,14 +137,28 @@ class LocalModelEndpointProbe(BaseProbe):
                 except Exception as e:
                     reports.append({"api_base": base, "reachable": False, "error": str(e)})
                     worst_summary = f"{base} unreachable"
+                    port = urlparse(base).port
+                    serve_alias = next(
+                        (m for m in sorted(required) if resolve_model_ref(m)), None
+                    )
+                    if serve_alias:
+                        missing_actions.append(
+                            ProbeAction(
+                                action_type="command",
+                                label="Start Model Server",
+                                payload=(
+                                    f"artemis model serve {serve_alias}"
+                                    + (f" --port {port}" if port else "")
+                                ),
+                            )
+                        )
                     missing_actions.append(
                         ProbeAction(
                             action_type="hint",
-                            label="Start Model Server",
+                            label="Other servers",
                             payload=(
-                                f"Start the OpenAI-compatible server bound to {base} "
-                                f"(e.g. `ollama serve`, `mlx_lm.server`, or your platform's "
-                                f"serve command)."
+                                f"Or start any OpenAI-compatible server bound to {base} "
+                                f"(e.g. `ollama serve`)."
                             ),
                         )
                     )
@@ -159,17 +175,26 @@ class LocalModelEndpointProbe(BaseProbe):
                 )
                 for alias in missing:
                     worst_summary = f"model '{alias}' not installed"
-                    missing_actions.append(
-                        ProbeAction(
-                            action_type="hint",
-                            label=f"Pull {alias}",
-                            payload=(
-                                f"Install '{alias}' with the model server's pull command "
-                                f"(e.g. `ollama pull {alias}`) so it appears in "
-                                f"GET {base}/models."
-                            ),
+                    if resolve_model_ref(alias):
+                        missing_actions.append(
+                            ProbeAction(
+                                action_type="command",
+                                label=f"Pull {alias}",
+                                payload=f"artemis model pull {alias}",
+                            )
                         )
-                    )
+                    else:
+                        missing_actions.append(
+                            ProbeAction(
+                                action_type="hint",
+                                label=f"Install {alias}",
+                                payload=(
+                                    f"Install '{alias}' with the model server's pull "
+                                    f"command (e.g. `ollama pull {alias}`) so it "
+                                    f"appears in GET {base}/models."
+                                ),
+                            )
+                        )
 
         unreachable = [r for r in reports if not r.get("reachable")]
         with_missing = [r for r in reports if r.get("missing")]

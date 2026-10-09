@@ -1,48 +1,42 @@
 # Running ARTEMIS on a Local Model
 
 ARTEMIS can drive every agent node (planner, operator, checker, flash,
-grounding, OCR helpers) from a single local multimodal model served over an
-OpenAI-compatible HTTP API — no cloud key required.
+grounding, OCR helpers) from a single local multimodal model — and it can
+pull and serve that model itself, no external serving stack or cloud key
+required.
 
 Tested reference setup: **Gemma 4 E4B (4-bit, MLX)** on Apple Silicon —
 ~6 GB resident, ~40 tok/s decode, both `flash` and `pro` profiles verified
 end-to-end on a real device.
 
-Any server that speaks `/v1/chat/completions` (text + `image_url` + tool
-calls) works the same way: `mlx_lm.server`, Ollama, LM Studio, llama.cpp,
-vLLM, …
-
-## 1. Install a model server
-
-Pick one. Anything exposing the OpenAI chat-completions API with vision and
-tool-call support qualifies.
-
-**MLX (Apple Silicon)**
+## 1. Install the local-model extra (Apple Silicon)
 
 ```bash
-pip install mlx-lm
-mlx_lm.server --model mlx-community/gemma-4-E4B-it-4bit --port 8080
+pip install 'artemis[local]'     # or: uv pip install -e '.[local]'
 ```
 
-**Ollama**
+This installs `mlx-vlm` + `huggingface-hub`, the serving stack ARTEMIS
+manages for you. (On other platforms, skip to
+[BYO server](#byo-any-openai-compatible-server).)
+
+## 2. Pull and serve the model
 
 ```bash
-ollama serve   # listens on :11434; use api_base http://127.0.0.1:11434/v1
+artemis model list                  # known aliases
+artemis model pull gemma4-e4b       # download weights (~5 GB)
+artemis model serve gemma4-e4b      # OpenAI-compatible server on :8080
 ```
 
-## 2. Pull the model
+`serve` runs `mlx_vlm.server` as a managed background process, waits for
+readiness, and prints the endpoint. Lifecycle:
 
 ```bash
-# Ollama
-ollama pull gemma3:4b
+artemis model status                # is the managed server up?
+artemis model stop                  # shut it down
 ```
 
-Whatever name the server reports in `GET /v1/models` is the string the
-ARTEMIS config's `"model"` field must match exactly.
-
-```bash
-curl http://127.0.0.1:8080/v1/models   # confirm your alias appears
-```
+The served aliases appear under `GET /v1/models` — the same names the
+ARTEMIS config's `"model"` field must match.
 
 ## 3. Point ARTEMIS at it
 
@@ -53,14 +47,13 @@ export ARTEMIS_ARTEMIS_JSONC=config/artemis.gemma4.jsonc
 # or copy it over your artemis.jsonc
 ```
 
-To adapt it for a different server, edit the `default` block (every node
-inherits it unless overridden):
+The `default` block (every node inherits it unless overridden):
 
 ```jsonc
 "default": {
   "provider": "custom",                       // skips cloud credential checks
   "model": "gemma4-e4b",                      // must match /v1/models exactly
-  "api_base": "http://127.0.0.1:8080/v1",     // your server
+  "api_base": "http://127.0.0.1:8080/v1",     // the managed server
   "timeout": 300,                             // local decode is slower; keep generous
 }
 ```
@@ -75,11 +68,11 @@ The **Local Model Endpoint** probe checks the endpoint is reachable and that
 every configured alias is actually served:
 
 - ✅ `Serving N model(s)` — ready
-- ❌ `model 'X' not installed` → hint: install `X` with your server's pull
-  command so it appears in `GET {api_base}/models`
-- ❌ `endpoint unreachable` → hint: start the server bound to that base
+- ❌ `model 'X' not installed` → action: `artemis model pull X`
+- ❌ `endpoint unreachable` → action: `artemis model serve X --port 8080`
 
-The same probe backs the web console's setup wizard and `mobile_diagnose`.
+The same probe backs the web console's setup wizard and `mobile_diagnose`,
+so remediation is one click anywhere it appears.
 
 ## 5. Run
 
@@ -88,6 +81,14 @@ uv run artemis run "Open Settings" --profile flash
 # or the heavier planner/operator/checker loop:
 uv run artemis run "Open Reminders" --profile pro
 ```
+
+## BYO: any OpenAI-compatible server
+
+ARTEMIS only needs `/v1/chat/completions` with text + `image_url` + tool
+calls. Ollama, LM Studio, llama.cpp, vLLM all work — pull the model there,
+set `api_base` + `"model"` to match its `/v1/models`, and `artemis doctor`
+verifies the same way (remediation hints fall back to generic pull/serve
+guidance for non-catalog aliases).
 
 ## Tuning notes for small local models
 

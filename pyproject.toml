@@ -89,6 +89,13 @@ dev = [
     "pyright>=1.1.389",
     "pre-commit>=3.5.0",
 ]
+# `artemis model pull/serve`: managed local model serving via mlx-vlm.
+# Apple Silicon only; other platforms should run an OpenAI-compatible
+# server (e.g. Ollama) and point api_base at it.
+local = [
+    "mlx-vlm>=0.7.6,<1.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "huggingface-hub>=0.30,<2.0",
+]
 
 [project.scripts]
 artemis = "artemis.interfaces.cli.main:cli"
