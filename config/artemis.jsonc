@@ -94,16 +94,16 @@
 
     // 👁️ Object Detector & Explorer (Flash Mode): Visual coordinates grounding and bounding boxes
     // Local gemma4-e4b via ondevice-agent-platform (OpenAI-compatible :8080).
-    // grounding grid verified on qwen-vl (kept as fallback); gemma grid output
-    // is plausible on synthetic input but NOT verified on real UIs yet.
-    // Previously verified on-device: qwen-vl emits [x, y] on the 0-1000 grid matching the
-    // detector contract; "xy_1000" only fixes the axis order vs Gemini ER's
-    // [y, x]. Off-contract batches still auto-rescale (0-1 or raw pixels).
+    // grounding verified on synthetic UI: gemma4-e4b emits box_2d as
+    // [ymin,xmin,ymax,xmax]/1000 = the detector's native yx_1000 contract
+    // (pixel-accurate on a settings-screen mock; real-UI eval still pending).
+    // qwen-vl fallback keeps "xy_1000" — it emits [x, y] on the 0-1000 grid.
+    // Off-contract batches still auto-rescale (0-1 or raw pixels).
     "object_detector": {
       "provider": "custom",
       "model": "gemma4-e4b",
       "api_base": "http://127.0.0.1:8080/v1",
-      "coordinate_format": "xy_1000",
+      "coordinate_format": "yx_1000",
       "timeout": 300,
       "fallback": {
         "provider": "custom",
