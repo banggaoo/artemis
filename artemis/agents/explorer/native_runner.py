@@ -45,8 +45,8 @@ from artemis.llm.reliability import (
     retry_policy_for,
 )
 from artemis.services.llm import _record_llm_event, _record_llm_retry
-from third_party.mobile_use.utils.logger import get_logger
 from artemis.utils.image_mime import image_mime_type
+from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

@@ -33,21 +33,22 @@ class IosActuator(AdbActuator):
     async def input_text(
         self, text: str, target: tuple[int, int] | None = None, clear_exist: bool = True
     ) -> ActionResult:
-        if clear_exist:
-            return ActionResult.failure(
-                "input_text",
-                "Whole-field clearing is unavailable on iOS. Focus an empty field or place "
-                "the cursor manually, then set clear_exist=false.",
-                code=ActionCode.UNSUPPORTED,
-            )
+        # Xcode has no verified whole-field clear, but focusing a field like
+        # the Safari address bar select-alls its content, so typed text still
+        # replaces it. The result must not claim a clear that never happened.
         if target:
             error = await ensure_focus_at_coords(self.controller, *self._to_px(*target))
             if error:
                 return ActionResult.failure("input_text", error)
-        success = await self.controller.type_text(text, clear_existing=clear_exist)
+        success = await self.controller.type_text(text, clear_existing=False)
         if not success:
             return ActionResult.failure("input_text", "Failed to type text on the iOS device.")
-        return ActionResult.success("input_text", f"Typed '{text}'.")
+        note = (
+            " (no whole-field clear on iOS; text was inserted without clearing)"
+            if clear_exist
+            else ""
+        )
+        return ActionResult.success("input_text", f"Typed '{text}'.{note}")
 
     async def press_key(self, key: str) -> ActionResult:
         if await self.controller.press_key(key):

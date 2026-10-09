@@ -17,6 +17,7 @@ import asyncio
 import base64
 from io import BytesIO
 import json
+import re
 from pathlib import Path
 import plistlib
 import sys
@@ -50,6 +51,10 @@ if TYPE_CHECKING:
     from artemis.drivers.ios.physical_recording import PhysicalIosRecorder
 
 logger = get_logger(__name__)
+
+# Xcode reports an orphaned interaction session as "already in use by a
+# different session with key '<label>'"; the label doubles as the end key.
+_STALE_SESSION_RE = re.compile(r"in use by a different session with key '([^']+)'")
 
 
 async def _parse_listapps_output(raw: bytes) -> dict[str, Any]:
@@ -193,6 +198,18 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
             if not isinstance(identifier, str) or not identifier:
                 raise RuntimeError("XcodeOpenWorkspace returned no usable workspace identifier.")
             return await self._bridge.call("DeviceInteractionStartSession", start_arguments)
+        except RuntimeError as error:
+            # A crashed runner leaves its interaction session behind and Xcode
+            # rejects newcomers with "already in use by ... key '<label>'". End
+            # that orphan — the label works as the key — and retry once.
+            match = _STALE_SESSION_RE.search(str(error))
+            if match is None:
+                raise
+            await self._bridge.call(
+                "DeviceInteractionEndSession",
+                {"interactionSessionKey": match.group(1)},
+            )
+            return await self._bridge.call("DeviceInteractionStartSession", start_arguments)
 
     async def connect(self) -> None:
         async with self._connect_lock:
@@ -276,7 +293,31 @@ class XcodeSimulatorDriver(BaseDeviceDriver):
         arguments = {"interactSessionKey": self._session_key, "interactionCommand": command}
         if activation:
             arguments["activationBundleId"] = activation
-        return await self._bridge.call("DeviceInteractionSynthesize", arguments)
+        try:
+            return await self._bridge.call("DeviceInteractionSynthesize", arguments)
+        except RuntimeError as error:
+            # Xcode drops idle interaction sessions; "Session not found" means
+            # the command never ran, so restarting the session and retrying
+            # once cannot double-execute it.
+            if "session not found" not in str(error).casefold():
+                raise
+            await self._restart_interaction_session()
+            arguments["interactSessionKey"] = self._session_key
+            return await self._bridge.call("DeviceInteractionSynthesize", arguments)
+
+    async def _restart_interaction_session(self) -> None:
+        """Replace the dropped Xcode interaction session in place."""
+        if not self._bridge.connected:
+            raise RuntimeError(
+                "Xcode MCP bridge is not connected; reconnect the driver before retrying."
+            )
+        session = await self._start_interaction_session()
+        key = session.get("interactionSessionKey")
+        if not key:
+            raise RuntimeError("Xcode did not return a device interaction session key.")
+        self._validate_session_device(session)
+        self._session_key = key
+        logger.warning("Re-established the Xcode interaction session after Xcode dropped it.")
 
     def _require_connected(self) -> None:
         if not self._session_key or self._device_id.strip().lower() == BOOTED_SIMULATOR_ID:
