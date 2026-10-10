@@ -48,6 +48,17 @@ WDA_HOST_ENV = "ARTEMIS_IOS_WDA_HOST"
 WDA_DEFAULT_PORT = 8100
 WDA_REQUEST_TIMEOUT = 30.0
 
+#: Server-side session invalidation markers — WDA answers these once the
+#: session's target app died, so the request provably did not execute and is
+#: safe to retry after rebinding.
+_SESSION_LOST_MARKERS = (
+    "invalid session id",
+    "no such session",
+    "stale session",
+    "session does not exist",
+    "session id is not valid",
+)
+
 
 class WdaUnavailableError(RuntimeError):
     """The WebDriverAgent server could not be reached or did not respond."""
@@ -60,6 +71,7 @@ class WdaClient:
         self._base = base_url.rstrip("/")
         self._timeout = timeout
         self._session_id: str | None = None
+        self._reopen_lock = asyncio.Lock()
 
     @property
     def base_url(self) -> str:
@@ -104,8 +116,13 @@ class WdaClient:
         if isinstance(payload_out, dict) and "value" in payload_out:
             value = payload_out["value"]
             if isinstance(value, dict) and value.get("error"):
-                message = value.get("message") or value["error"]
-                raise RuntimeError(f"WebDriverAgent {method} {path} failed: {message}")
+                # Keep both fields in the message — recovery matching keys off
+                # the error code ("invalid session id") while humans need the
+                # readable message.
+                message = value.get("message") or ""
+                error_code = value["error"]
+                detail = f"{error_code}: {message}" if message else str(error_code)
+                raise RuntimeError(f"WebDriverAgent {method} {path} failed: {detail}")
             # WDA reports the live session in the outer /status envelope, not
             # inside value — surface it so a foreign session is detectable.
             if (
@@ -124,6 +141,7 @@ class WdaClient:
         path: str,
         payload: dict[str, Any] | None = None,
         timeout: float | None = None,
+        _recovered: bool = False,
     ) -> Any:
         request_task = asyncio.create_task(
             asyncio.to_thread(self._sync_request, method, path, payload, timeout or self._timeout)
@@ -141,6 +159,99 @@ class WdaClient:
             except (OSError, ValueError, RuntimeError, TimeoutError) as drain_error:
                 logger.debug(f"WDA request drain failed while cancelling: {drain_error}")
             raise
+        except RuntimeError as error:
+            if (
+                _recovered
+                or self._is_session_admin(method, path)
+                or not self._is_session_loss(error)
+            ):
+                raise
+            # The dead session never ran the command, so any method is safe
+            # to replay after rebinding.
+            path = await self._reopen_session_with_path(path)
+            return await self._request(method, path, payload, timeout, _recovered=True)
+        except WdaUnavailableError:
+            if _recovered or method != "GET":
+                raise
+            # A timed-out write may have executed device-side, so only reads
+            # recover transparently; writes surface the error and the next
+            # observation rebinds if the session really is gone.
+            path = await self._reopen_session_with_path(path, suppress_errors=True)
+            return await self._request(method, path, payload, timeout, _recovered=True)
+
+    async def _reopen_session_with_path(
+        self, path: str, suppress_errors: bool = False
+    ) -> str:
+        """Rebind the session and rewrite the old session id inside ``path``."""
+        old_id = self._session_id
+        await self._reopen_session(suppress_errors=suppress_errors)
+        if old_id and self._session_id and old_id != self._session_id:
+            path = path.replace(old_id, self._session_id)
+        return path
+
+    def _is_session_loss(self, error: RuntimeError) -> bool:
+        message = str(error).casefold()
+        return any(marker in message for marker in _SESSION_LOST_MARKERS)
+
+    @staticmethod
+    def _is_session_admin(method: str, path: str) -> bool:
+        # Session create/delete must not trigger recovery: creating during
+        # recovery recurses, and deleting a dead session should fail quietly.
+        return (method == "POST" and path == "/session") or (
+            method == "DELETE" and path.startswith("/session/")
+        )
+
+    async def _reopen_session(self, suppress_errors: bool = False) -> None:
+        """Rebind a dead WDA session, anchored to the current foreground app.
+
+        Binding to the foreground bundle keeps the device's visible app
+        unchanged (a Preferences anchor would pull Settings to the front
+        mid-task); SpringBoard is not activatable as a session target, so a
+        home-screen foreground falls back to Preferences.
+        """
+        async with self._reopen_lock:
+            anchor = await self._foreground_bundle()
+            if not anchor or anchor == "com.apple.springboard":
+                anchor = "com.apple.Preferences"
+            # Drop the zombie first so the preflight does not see it as a
+            # foreign session and refuse the replacement.
+            old_id = self._session_id
+            if old_id:
+                self._session_id = None
+                try:
+                    await asyncio.to_thread(
+                        self._sync_request, "DELETE", f"/session/{old_id}", None, 5.0
+                    )
+                except (RuntimeError, WdaUnavailableError, OSError):
+                    pass
+            try:
+                self._session_id = await self._create_owned_session(
+                    adopt_existing=False, bundle_id=anchor
+                )
+                logger.info(
+                    f"WebDriverAgent session rebound to {self._session_id} "
+                    f"(anchor {anchor}) on {self._base}"
+                )
+            except Exception as error:
+                self._session_id = None
+                if not suppress_errors:
+                    raise WdaUnavailableError(
+                        f"WebDriverAgent session recovery failed on {self._base}: {error}"
+                    ) from error
+                logger.debug(f"WDA session rebound attempt failed: {error}")
+
+    async def _foreground_bundle(self) -> str | None:
+        """Session-free probe of the device's foreground app bundle id."""
+        try:
+            value = await asyncio.to_thread(
+                self._sync_request, "GET", "/wda/activeAppInfo", None, 5.0
+            )
+        except (RuntimeError, WdaUnavailableError, OSError):
+            return None
+        if isinstance(value, dict):
+            bundle = value.get("bundleId") or value.get("bundleIdentifier")
+            return bundle if isinstance(bundle, str) and bundle else None
+        return None
 
     # --- Session lifecycle ---
 
@@ -167,7 +278,9 @@ class WdaClient:
             )
         return value
 
-    async def _create_owned_session(self, adopt_existing: bool) -> str:
+    async def _create_owned_session(
+        self, adopt_existing: bool, bundle_id: str = "com.apple.Preferences"
+    ) -> str:
         """Status preflight, POST /session, and ID assignment as one unit."""
         if self._session_id:
             return self._session_id
@@ -192,12 +305,11 @@ class WdaClient:
                 # A bare session binds to an ephemeral pid.0 application that
                 # dies instantly ("stale element reference" on first command).
                 # com.apple.springboard cannot be activated as an app target;
-                # Settings is always installed and activatable, anchoring the
-                # session to a real process. Artemis launches real apps through
-                # its own calls afterward.
+                # the anchor must be an installed, activatable app so the
+                # session binds to a real process.
                 "alwaysMatch": {
                     "platformName": "iOS",
-                    "bundleId": "com.apple.Preferences",
+                    "bundleId": bundle_id,
                 },
                 "firstMatch": [{}],
             }

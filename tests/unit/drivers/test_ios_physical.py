@@ -1655,3 +1655,78 @@ def test_parse_wda_elements_skips_bad_parent_rect_but_keeps_children(bad_rect):
         tree["rect"] = bad_rect
     elements = wda.parse_wda_elements(tree, (1.0, 1.0), 300, 600)
     assert [e["text"] for e in elements] == ["OK"]
+
+
+class _WdaFlakyServer:
+    """urlopen stub: session 'old' is dead, 'new' comes up on POST /session."""
+
+    def __init__(self):
+        self.paths = []
+
+    def _response(self, payload):
+        class _R:
+            def __init__(self, raw):
+                self._raw = json.dumps(payload).encode()
+
+            def read(self):
+                return self._raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        return _R(payload)
+
+    def urlopen(self, request, timeout):
+        url = request.full_url
+        self.paths.append((request.get_method(), url))
+        if url.endswith("/status"):
+            return self._response({"value": {"ready": True}})
+        if url.endswith("/wda/activeAppInfo"):
+            return self._response({"value": {"bundleId": "com.example.fg"}})
+        if url.endswith("/session") and request.get_method() == "POST":
+            return self._response({"value": {"sessionId": "new-session"}})
+        if "/session/old-session/" in url:
+            return self._response(
+                {"value": {"error": "invalid session id", "message": "Session died"}}
+            )
+        if "/session/new-session/" in url:
+            return self._response({"value": {"width": 393, "height": 852}})
+        return self._response({"value": {}})
+
+
+@pytest.mark.asyncio
+async def test_wda_request_recovers_dead_session_and_rewrites_path(monkeypatch):
+    server = _WdaFlakyServer()
+    monkeypatch.setattr(wda.urllib.request, "urlopen", server.urlopen)
+    client = WdaClient("http://wda.test:8100")
+    client._session_id = "old-session"
+
+    size = await client.window_size()
+
+    assert size == (393.0, 852.0)
+    assert client.session_id == "new-session"
+    # The retried request carried the fresh session id, not the dead one.
+    assert any("/session/new-session/window/size" in url for _, url in server.paths)
+
+
+@pytest.mark.asyncio
+async def test_wda_write_timeout_does_not_reopen_or_retry(monkeypatch):
+    calls = []
+
+    def flaky(request, timeout):
+        calls.append(request.full_url)
+        raise TimeoutError("simulated stall")
+
+    monkeypatch.setattr(wda.urllib.request, "urlopen", flaky)
+    client = WdaClient("http://wda.test:8100")
+    client._session_id = "old-session"
+
+    with pytest.raises(wda.WdaUnavailableError):
+        await client.tap(10, 10)
+
+    # A timed-out input may have landed device-side: no session churn, no retry.
+    assert len(calls) == 1
+    assert client.session_id == "old-session"
