@@ -46,7 +46,8 @@
       "model": "llama3.2-vision",
       "fallback": { "provider": "openai", "model": "llama3.2-vision" }
     },
-    // Fully local route via a local OpenAI-compatible server.
+    // Fully local route via any OpenAI-compatible server — Artemis-managed
+    // models (`artemis model serve <alias>`) or BYO (Ollama, vLLM, LM Studio).
     // Copy the provider/model/api_base keys into "default" or a node below;
     // "custom" skips cloud credential checks and needs no API key.
     "local-qwen": {

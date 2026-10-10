@@ -14,12 +14,15 @@
 
 """Local Model Endpoint Readiness Probe.
 
-When artemis.jsonc routes nodes to a ``custom`` provider (a local
-OpenAI-compatible model server at ``api_base``), every configured model
-alias must actually be pulled and served there. This probe verifies the
-endpoint is reachable and that each required model appears in
-``GET {api_base}/models``, guiding the user through model installation or
-server startup when it does not.
+When artemis.jsonc routes nodes to a ``custom`` provider (an OpenAI-compatible
+endpoint at ``api_base``), every configured model must actually be served
+there. This probe verifies the endpoint is reachable and that each required
+model appears in ``GET {api_base}/models``.
+
+Guidance is model-aware: aliases in the Artemis local-model catalog get
+``artemis model pull`` / ``artemis model serve`` commands; other models are
+BYO — the probe suggests serving them with the endpoint's own tooling
+(Ollama, vLLM, LM Studio, ...) instead of a command Artemis cannot run.
 """
 
 from typing import Any
@@ -41,6 +44,28 @@ from third_party.mobile_use.utils.logger import get_logger
 logger = get_logger(__name__)
 
 _PROBE_HTTP_TIMEOUT_S = 5.0
+
+
+def _artemis_managed(model: str) -> bool:
+    """Whether the model is an Artemis catalog alias (``artemis model``
+    lifecycle commands apply) or a BYO name the endpoint serves itself."""
+    try:
+        from artemis.config.local_models import LOCAL_MODELS
+
+        return model in LOCAL_MODELS
+    except Exception:
+        return False
+
+
+def _serve_port(api_base: str) -> str | None:
+    """Port from an api_base URL, for ``--port`` in serve guidance."""
+    try:
+        from urllib.parse import urlparse
+
+        port = urlparse(api_base).port
+        return str(port) if port else None
+    except Exception:
+        return None
 
 
 def _iter_configured_llms() -> list[LLM]:
@@ -124,8 +149,10 @@ class LocalModelEndpointProbe(BaseProbe):
         reports: list[dict[str, Any]] = []
         missing_actions: list[ProbeAction] = []
         worst_summary = ""
+        managed_all: set[str] = set()
         async with httpx.AsyncClient(timeout=_PROBE_HTTP_TIMEOUT_S) as client:
             for base, required in sorted(endpoints.items()):
+                managed_all.update(a for a in required if _artemis_managed(a))
                 try:
                     resp = await client.get(f"{base}/models")
                     resp.raise_for_status()
@@ -137,31 +164,28 @@ class LocalModelEndpointProbe(BaseProbe):
                 except Exception as e:
                     reports.append({"api_base": base, "reachable": False, "error": str(e)})
                     worst_summary = f"{base} unreachable"
-                    port = urlparse(base).port
-                    serve_alias = next(
-                        (m for m in sorted(required) if resolve_model_ref(m)), None
-                    )
-                    if serve_alias:
+                    managed = sorted(a for a in required if _artemis_managed(a))
+                    if managed:
+                        port = _serve_port(base)
+                        port_arg = f" --port {port}" if port else ""
                         missing_actions.append(
                             ProbeAction(
                                 action_type="command",
                                 label="Start Model Server",
+                                payload=f"artemis model serve {managed[0]}{port_arg}",
+                            )
+                        )
+                    else:
+                        missing_actions.append(
+                            ProbeAction(
+                                action_type="hint",
+                                label="Start Model Server",
                                 payload=(
-                                    f"artemis model serve {serve_alias}"
-                                    + (f" --port {port}" if port else "")
+                                    f"Start the OpenAI-compatible model server for {base}"
+                                    " and re-run diagnostics."
                                 ),
                             )
                         )
-                    missing_actions.append(
-                        ProbeAction(
-                            action_type="hint",
-                            label="Other servers",
-                            payload=(
-                                f"Or start any OpenAI-compatible server bound to {base} "
-                                f"(e.g. `ollama serve`)."
-                            ),
-                        )
-                    )
                     continue
                 missing = sorted(required - served)
                 reports.append(
@@ -175,7 +199,7 @@ class LocalModelEndpointProbe(BaseProbe):
                 )
                 for alias in missing:
                     worst_summary = f"model '{alias}' not installed"
-                    if resolve_model_ref(alias):
+                    if _artemis_managed(alias):
                         missing_actions.append(
                             ProbeAction(
                                 action_type="command",
@@ -187,11 +211,12 @@ class LocalModelEndpointProbe(BaseProbe):
                         missing_actions.append(
                             ProbeAction(
                                 action_type="hint",
-                                label=f"Install {alias}",
+                                label=f"Serve {alias}",
                                 payload=(
-                                    f"Install '{alias}' with the model server's pull "
-                                    f"command (e.g. `ollama pull {alias}`) so it "
-                                    f"appears in GET {base}/models."
+                                    f"'{alias}' is not served at {base}. Pull and serve"
+                                    " it with that server's own tooling"
+                                    " (e.g. `ollama pull`, a vLLM/LM Studio config)"
+                                    " or choose a model the endpoint already serves."
                                 ),
                             )
                         )
@@ -212,7 +237,7 @@ class LocalModelEndpointProbe(BaseProbe):
                     f"{len(reports)} local endpoint(s) reachable and all configured "
                     f"model aliases are pulled and serving."
                 ),
-                metadata={"endpoints": reports},
+                metadata={"endpoints": reports, "managed": sorted(managed_all)},
                 actions=[
                     ProbeAction(
                         action_type="hint",
@@ -243,6 +268,6 @@ class LocalModelEndpointProbe(BaseProbe):
             is_blocker=self.is_blocker,
             summary=worst_summary,
             description=description,
-            metadata={"endpoints": reports},
+            metadata={"endpoints": reports, "managed": sorted(managed_all)},
             actions=missing_actions,
         )

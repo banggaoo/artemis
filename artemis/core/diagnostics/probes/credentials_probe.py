@@ -144,8 +144,9 @@ class LLMCredentialsProbe(BaseProbe):
                 )
                 api_keys_map[prov_id] = val.strip()
 
-        # Config-bound local endpoints (e.g. a local OpenAI-compatible server) need no
-        # API key: the custom provider authenticates to a loopback server.
+        # Config-bound local endpoints (artemis-served models, Ollama, vLLM,
+        # any OpenAI-compatible server) need no API key: the custom provider
+        # authenticates to a loopback or self-hosted server.
         try:
             from artemis.core.diagnostics.probes.local_model_probe import (
                 _local_endpoints,
