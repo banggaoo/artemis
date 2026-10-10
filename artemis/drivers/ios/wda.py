@@ -57,6 +57,13 @@ _SESSION_LOST_MARKERS = (
     "stale session",
     "session does not exist",
     "session id is not valid",
+    # Anchor-app death — WDA reports "invalid element state: The application
+    # under test with bundle id ... is not running, possibly crashed" rather
+    # than a session error. Match the message body, not the generic error
+    # code, which also covers legitimately unhittable elements.
+    "application under test",
+    "possibly crashed",
+    "is not running",
 )
 
 

@@ -1730,3 +1730,30 @@ async def test_wda_write_timeout_does_not_reopen_or_retry(monkeypatch):
     # A timed-out input may have landed device-side: no session churn, no retry.
     assert len(calls) == 1
     assert client.session_id == "old-session"
+
+
+@pytest.mark.asyncio
+async def test_wda_recovers_when_anchor_app_dies(monkeypatch):
+    """WDA reports app death as 'invalid element state', not a session error."""
+    server = _WdaFlakyServer()
+
+    def urlopen(request, timeout):
+        url = request.full_url
+        if "/session/old-session/" in url:
+            return server._response(
+                {
+                    "value": {
+                        "error": "invalid element state",
+                        "message": "The application under test with bundle id "
+                        "'com.apple.Preferences' is not running, possibly crashed",
+                    }
+                }
+            )
+        return server.urlopen(request, timeout)
+
+    monkeypatch.setattr(wda.urllib.request, "urlopen", urlopen)
+    client = WdaClient("http://wda.test:8100")
+    client._session_id = "old-session"
+
+    assert await client.window_size() == (393.0, 852.0)
+    assert client.session_id == "new-session"
