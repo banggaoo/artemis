@@ -791,6 +791,12 @@ class ActiveFocusPromptComponent(PromptComponent):
             )
         else:
             lines.append("No milestone is marked in progress — mark one `[/]`.")
+        lines.append(
+            "If the goal is already achieved on screen, settle the plan and call"
+            " `mark_done` — do not take further actions. If the goal cannot be"
+            " achieved (e.g., a required app is not installed), mark the"
+            " milestone `[!]` blocked instead of searching indefinitely."
+        )
         lines.append("End the turn only with a Turn-Ending Action.")
         text = "\n".join(lines)
         if builder.human_footer is not None:
