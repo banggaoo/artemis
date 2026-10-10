@@ -155,8 +155,10 @@ with an `alwaysMatch` `bundleId`. New and recovered sessions anchor to the
 device's foreground app, falling back to `com.apple.Preferences` when the
 foreground is SpringBoard (`com.apple.springboard` is not an activatable
 session target) or cannot be determined. When a session dies mid-task — WDA
-replies `invalid session id` or `session does not exist` while device-level
-screenshots keep working — the client drops the zombie, rebinds under a lock,
+replies `invalid session id`/`session does not exist`, or `invalid element
+state: The application under test ... is not running` when the anchor app
+itself exits, while device-level screenshots keep working — the client drops
+the zombie, rebinds under a lock,
 rewrites the old session id in the request path, and retries the command once.
 Requests that timed out are never replayed: a stalled input may have executed
 device-side, so only reads recover transparently.
