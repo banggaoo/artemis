@@ -642,7 +642,9 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
         A cached launch pid only prioritizes among processes already proven to
         belong to the app — a recycled pid must never select a foreign process.
         """
-        apps = await self._devicectl_json("info", "apps")
+        # ``--include-default-apps`` keeps system apps (Safari, Settings)
+        # resolvable; the default view lists developer-installed apps only.
+        apps = await self._devicectl_json("info", "apps", "--include-default-apps")
         url_prefix = ""
         for app in apps.get("apps", []):
             if isinstance(app, dict) and app.get("bundleIdentifier") == package_name:
@@ -749,7 +751,12 @@ class PhysicalIosDriver(XcodeSimulatorDriver):
     async def list_apps(self) -> dict[str, str]:
         async with self._operation_lock:
             self._require_connected()
-            apps = await self._devicectl_json("info", "apps")
+            # ``info apps`` defaults to developer-installed apps only, which
+            # hides Safari and friends; include the system defaults so app
+            # resolution can find and launch them.
+            apps = await self._devicectl_json(
+                "info", "apps", "--include-default-apps"
+            )
         result = {}
         for app in apps.get("apps", []):
             bundle = app.get("bundleIdentifier") or app.get("bundleID")
