@@ -189,7 +189,16 @@ class WdaClient:
             )
         payload = {
             "capabilities": {
-                "alwaysMatch": {"platformName": "iOS"},
+                # A bare session binds to an ephemeral pid.0 application that
+                # dies instantly ("stale element reference" on first command).
+                # com.apple.springboard cannot be activated as an app target;
+                # Settings is always installed and activatable, anchoring the
+                # session to a real process. Artemis launches real apps through
+                # its own calls afterward.
+                "alwaysMatch": {
+                    "platformName": "iOS",
+                    "bundleId": "com.apple.Preferences",
+                },
                 "firstMatch": [{}],
             }
         }
