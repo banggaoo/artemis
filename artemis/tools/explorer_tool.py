@@ -480,8 +480,8 @@ def render_operator_blocks(
         logger.error(f"Failed to read annotated explorer image: {e}")
         return text
     return [
-        {"type": "text", "text": text},
         {"type": "image_url", "image_url": {"url": image_data_uri(img_b64)}},
+        {"type": "text", "text": text},
     ]
 
 

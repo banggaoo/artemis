@@ -116,11 +116,11 @@ class ImageProcessor:
             SystemMessage(content=prompt_template),
             HumanMessage(
                 content=[
-                    {"type": "text", "text": "Here is the target image. Begin writing your code."},
                     {
                         "type": "image_url",
                         "image_url": {"url": image_data_uri(img_b64)},
                     },
+                    {"type": "text", "text": "Here is the target image. Begin writing your code."},
                 ]
             ),
         ]

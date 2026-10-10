@@ -275,7 +275,7 @@ class PlannerNode:
 
         human_message = Template(human_content).render(**render_kwargs)
 
-        human_message_content = [{"type": "text", "text": human_message}]
+        human_message_content = []
         if screenshot_b64:
             human_message_content.append(
                 {
@@ -283,6 +283,9 @@ class PlannerNode:
                     "image_url": {"url": image_data_uri(screenshot_b64)},
                 }
             )
+        # Multimodal models ground more reliably when the image precedes the
+        # instruction text (image-first ordering).
+        human_message_content.append({"type": "text", "text": human_message})
         # Sliding-window models attend reliably to the tail of the sequence;
         # the submission protocol reminder must sit after the screenshot, or
         # the image tokens push it out of the local window.

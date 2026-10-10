@@ -65,8 +65,8 @@ class ScreenshotResult:
             return self.description
         encoded = base64.b64encode(self.image_bytes).decode("utf-8")
         return [
-            {"type": "text", "text": self.description},
             {"type": "image_url", "image_url": {"url": image_data_uri(encoded)}},
+            {"type": "text", "text": self.description},
         ]
 
 

@@ -365,11 +365,14 @@ class FlashRunner:
         """
         # ``turns`` is kept for call-site symmetry: the tail has the same shape
         # on every turn.
-        blocks: list[dict] = [
-            {"type": "text", "text": f"# CURRENT OBSERVATION [{ledger.elapsed_label()}]"}
-        ]
+        blocks: list[dict] = []
         if img_bytes:
             img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+            # Image-first: vision models ground better with the screenshot
+            # ahead of the observation text.
+            blocks.append({"type": "image_url", "image_url": {"url": image_data_uri(img_b64)}})
+        blocks.append({"type": "text", "text": f"# CURRENT OBSERVATION [{ledger.elapsed_label()}]"})
+        if img_bytes:
             blocks.append({"type": "text", "text": "--- Current Screenshot ---"})
             blocks.append({"type": "image_url", "image_url": {"url": image_data_uri(img_b64)}})
         if xml_list:

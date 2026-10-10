@@ -117,17 +117,16 @@ def _build_messages(
     action_name = action_item.get("action")
 
     user_content = [
-        {"type": "text", "text": _describe_target(action_item)},
+        # Images first, then the target description: vision models ground
+        # better when pixel content precedes the instruction text.
+        {"type": "image_url", "image_url": {"url": image_data_uri(orig_b64)}},
         {"type": "text", "text": "[Image 1 (Reference)]"},
-        {
-            "type": "image_url",
-            "image_url": {"url": image_data_uri(orig_b64)},
-        },
-        {"type": "text", "text": "[Image 2 (Current State)]"},
         {
             "type": "image_url",
             "image_url": {"url": image_data_uri(live_b64)},
         },
+        {"type": "text", "text": "[Image 2 (Current State)]"},
+        {"type": "text", "text": _describe_target(action_item)},
     ]
     if state:
         thoughts = []

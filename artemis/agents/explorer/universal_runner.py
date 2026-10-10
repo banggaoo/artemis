@@ -163,6 +163,10 @@ class UniversalRunnerMixin:
 
         user_content: list[dict[str, Any]] = [
             {
+                "type": "image_url",
+                "image_url": {"url": image_data_uri(img_b64)},
+            },
+            {
                 "type": "text",
                 "text": (
                     f"Operator Request:\n- Query: {query}\n"
@@ -274,7 +278,7 @@ class UniversalRunnerMixin:
             "type": "text",
             "text": f"[Annotated image(s) returned by: {', '.join(tool_names)}]",
         }
-        return HumanMessage(content=[header, *blocks])
+        return HumanMessage(content=[*blocks, header])
 
     async def _universal_dispatch_tools(
         self, tool_calls: list, messages: list[BaseMessage], turn: int
