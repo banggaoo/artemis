@@ -149,6 +149,18 @@ also refuses to replace a WDA session that belongs to another client, since
 WDA's `POST /session` unconditionally kills the active session; close the
 existing session first.
 
+A WDA session is anchored to an app bundle — a bare session binds to a
+transient `pid.0` and fails on first use, so Artemis always creates sessions
+with an `alwaysMatch` `bundleId`. New and recovered sessions anchor to the
+device's foreground app, falling back to `com.apple.Preferences` when the
+foreground is SpringBoard (`com.apple.springboard` is not an activatable
+session target) or cannot be determined. When a session dies mid-task — WDA
+replies `invalid session id` or `session does not exist` while device-level
+screenshots keep working — the client drops the zombie, rebinds under a lock,
+rewrites the old session id in the request path, and retries the command once.
+Requests that timed out are never replayed: a stalled input may have executed
+device-side, so only reads recover transparently.
+
 Protocol details verified against WebDriverAgent 16.14.0 (commit `d177824`,
 checked 2026-10-07):
 [FBSessionCommands.m](https://github.com/appium/WebDriverAgent/blob/d177824/WebDriverAgentLib/Commands/FBSessionCommands.m),
@@ -164,11 +176,18 @@ Differences from simulators:
 - The device must already be paired, trusted, and connected; Artemis never
   boots or unlocks it — unlock the device before connecting, since WDA cannot
   inject touches while it is locked. The first XCTest attach may also show an
-  on-device "Enable UI Automation" passcode prompt; approve it once.
+  on-device "Enable UI Automation" passcode prompt; approve it once, and expect
+  resprings or restarts to require approving it again. For longer tasks, set
+  **Auto-Lock** to *Never* (Settings > Display & Brightness) so the device
+  does not re-lock mid-task.
 - `--app-path` expects a device-signed artifact: an `.app` built for an arm64
   device destination (signed with a valid provisioning profile) or a `.ipa`.
   Simulator `.app` bundles are x86_64/arm64-simulator builds and cannot be
   installed on hardware.
+- System apps are discoverable: `manage_app` resolves Apple apps like Safari
+  (`com.apple.mobilesafari`) alongside installed apps — the physical driver
+  lists default apps via `devicectl`, so preinstalled apps launch by name or
+  bundle id without installation.
 - Screen recording polls `devicectl device capture screenshot` and assembles
   timestamped MP4 segments (~1–3 fps). There is no `recordVideo`-equivalent
   stream on hardware, so motion fidelity is lower than simulator captures and
@@ -392,7 +411,21 @@ the timeline rather than stretching recorded frames.
   check the signing team and provisioning profile, or build an `.ipa` with
   `xcodebuild -exportArchive` for the device destination.
 - **Physical input fails on a locked device:** unlock the device; WDA cannot
-  inject touches while locked.
+  inject touches while locked. A device that re-locks mid-task suspends UI
+  Automation — set Auto-Lock to Never while testing.
+- **"Not authorized for performing UI testing actions" (Code=41):** the
+  device's UI Automation authorization was reset — resprings and restarts can
+  clear it. Unlock the device, re-enable **UI Automation** under
+  Settings > Developer, approve any on-device prompt, and relaunch the runner
+  (`devicectl device process launch --terminate-existing <runner-bundle>`).
+- **WDA requests stall then recover:** WDA serializes HTTP requests, so a slow
+  `/source` or text-input call queues every later request, including
+  screenshots. Stalls clear when the queued request returns; they are not a
+  sign the session died.
+- **"invalid session id" mid-task:** the session's anchor app exited or another
+  client replaced the session. Artemis rebinds automatically (see the session
+  notes above); a failed rebind surfaces as a session-recovery error rather
+  than an endless retry loop.
 - **"No WebDriverAgent server answers":** no WDA endpoint responded on the
   CoreDevice tunnel or `127.0.0.1:8100`, and no installed runner matching
   `*WebDriverAgent*` was found to launch. Build and install the WDA runner
