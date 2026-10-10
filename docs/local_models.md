@@ -71,8 +71,10 @@ every configured alias is actually served:
 - ❌ `model 'X' not installed` → action: `artemis model pull X`
 - ❌ `endpoint unreachable` → action: `artemis model serve X --port 8080`
 
-The same probe backs the web console's setup wizard and `mobile_diagnose`,
-so remediation is one click anywhere it appears.
+The same probe backs the web console's setup wizard and `mobile_diagnose`.
+For catalog aliases the console shows **Run** buttons that execute
+`artemis model pull` / `serve` in the background with live logs; other
+servers get copyable commands for their own tooling.
 
 ## 5. Run
 
@@ -106,7 +108,10 @@ guidance for non-catalog aliases).
 - **Structured output**: strict JSON-schema `response_format` is not
   required — ARTEMIS uses function-calling for structured nodes.
 - **Termination**: 4B-class models can recognize the goal yet keep
-  deliberating instead of ending the turn. Prefer bounded goals
-  ("open X", "scroll to Y") over open-ended ones until your deployment adds
-  an explicit done affordance.
+  deliberating instead of ending the turn. The Pro/operator loop exposes a
+  `mark_done` tool for this: the model calls it when the goal is met, and the
+  convergence gate routes the claim to final verification — a false claim is
+  rejected and the run continues. Goals that cannot be achieved (e.g. a
+  required app is not installed) should be marked `[!]` blocked in the plan;
+  an all-resolved plan also routes to settlement instead of looping.
 - **Memory**: budget ~6 GB for a 4-bit 4B vision model + KV cache.
