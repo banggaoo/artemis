@@ -29,12 +29,19 @@ class LocalModelSpec:
 
     repo: str
     description: str = ""
+    # Recommended ``max_soft_tokens`` for the model's image processor —
+    # the vision-token budget per image. Gemma 4 ships with 280, which
+    # downsamples a phone screenshot to ~528x1152 effective; 1120 keeps
+    # near-original detail (~1056x2352) and measurably improves detection
+    # and not-found discipline. ``None`` leaves the shipped default.
+    vision_soft_tokens: int | None = None
 
 
 LOCAL_MODELS: dict[str, LocalModelSpec] = {
     "gemma4-e4b": LocalModelSpec(
         repo="mlx-community/gemma-4-e4b-it-4bit",
         description="Gemma 4 E4B 4-bit multimodal (tested; ~5 GB pull, ~6 GB resident)",
+        vision_soft_tokens=1120,
     ),
 }
 

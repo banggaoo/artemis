@@ -96,6 +96,13 @@ guidance for non-catalog aliases).
   turns; keep `timeout` ≥ 300 in the config for thinking-style models.
 - **Images**: strict servers cap images-per-request — Flash prunes
   intermediate screenshots automatically; no action needed.
+- **Vision detail**: Gemma 4's image processor defaults to 280 soft tokens
+  per image (≈528×1152 effective for a phone screenshot). `artemis model
+  serve` applies the catalog's recommended 1120 (≈near-original detail,
+  +840 prompt tokens/image) — measured to fix grounding misses and
+  hallucinated detections on dense screens. Override with
+  `--vision-tokens {70,140,280,560,1120}`; BYO servers keep their own
+  defaults.
 - **Structured output**: strict JSON-schema `response_format` is not
   required — ARTEMIS uses function-calling for structured nodes.
 - **Termination**: 4B-class models can recognize the goal yet keep

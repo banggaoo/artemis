@@ -69,3 +69,41 @@ class TestModelCli:
         result = runner.invoke(model_app, ["stop", "--port", "19191"])
         assert result.exit_code == 0
         assert "No managed server" in result.output
+
+
+class TestVisionSoftTokens:
+    def test_catalog_default(self):
+        from artemis.config.local_models import LOCAL_MODELS
+
+        assert LOCAL_MODELS["gemma4-e4b"].vision_soft_tokens == 1120
+
+    def test_apply_writes_processor_config(self, tmp_path, monkeypatch):
+        import json as _json
+
+        import artemis.interfaces.cli.commands.model as model_mod
+
+        snap = tmp_path / "snap"
+        snap.mkdir()
+        (snap / "processor_config.json").write_text(
+            _json.dumps({"image_processor": {"max_soft_tokens": 280}})
+        )
+        monkeypatch.setattr(model_mod, "_snapshot_path", lambda repo: snap)
+        assert model_mod._apply_vision_soft_tokens("any/repo", 1120)
+        cfg = _json.loads((snap / "processor_config.json").read_text())
+        assert cfg["image_processor"]["max_soft_tokens"] == 1120
+
+    def test_apply_missing_key_is_noop(self, tmp_path, monkeypatch):
+        import json as _json
+
+        import artemis.interfaces.cli.commands.model as model_mod
+
+        snap = tmp_path / "snap"
+        snap.mkdir()
+        (snap / "processor_config.json").write_text(_json.dumps({"other": {}}))
+        monkeypatch.setattr(model_mod, "_snapshot_path", lambda repo: snap)
+        assert not model_mod._apply_vision_soft_tokens("any/repo", 1120)
+
+    def test_serve_rejects_bad_token_value(self):
+        result = runner.invoke(model_app, ["serve", "--vision-tokens", "999"])
+        assert result.exit_code == 1
+        assert "vision-tokens" in result.output

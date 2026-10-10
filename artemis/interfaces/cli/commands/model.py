@@ -134,6 +134,42 @@ def pull_model(
     typer.secho(f"Ready: {alias} cached at {path}", fg=typer.colors.GREEN)
 
 
+_VISION_SOFT_TOKENS_SUPPORTED = (70, 140, 280, 560, 1120)
+
+
+def _snapshot_path(repo: str) -> Path | None:
+    """Locate the local HF snapshot for ``repo`` without hitting the network."""
+    try:
+        from huggingface_hub import snapshot_download
+
+        return Path(snapshot_download(repo, local_files_only=True))
+    except Exception:
+        return None
+
+
+def _apply_vision_soft_tokens(repo: str, tokens: int) -> bool:
+    """Write ``image_processor.max_soft_tokens`` into the pulled snapshot.
+
+    ``mlx_vlm.server`` exposes no flag for the vision-token budget; the
+    image processor reads it from ``processor_config.json`` at load time,
+    so we adjust the pulled snapshot before spawning. Idempotent.
+    """
+    snapshot = _snapshot_path(repo)
+    if snapshot is None:
+        return False
+    cfg_path = snapshot / "processor_config.json"
+    try:
+        cfg = json.loads(cfg_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    image_proc = cfg.get("image_processor")
+    if not isinstance(image_proc, dict) or "max_soft_tokens" not in image_proc:
+        return False
+    image_proc["max_soft_tokens"] = tokens
+    cfg_path.write_text(json.dumps(cfg, indent=2))
+    return True
+
+
 @model_app.command("serve")
 def serve_model(
     model: Annotated[
@@ -142,6 +178,14 @@ def serve_model(
     ] = DEFAULT_LOCAL_MODEL,
     host: Annotated[str, typer.Option("--host", help="Bind address.")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", "-p", help="Bind port.")] = 8080,
+    vision_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--vision-tokens",
+            help="Image soft-token budget (Gemma 4 supports "
+            f"{_VISION_SOFT_TOKENS_SUPPORTED}; catalog default used when omitted).",
+        ),
+    ] = None,
 ) -> None:
     """Start a managed OpenAI-compatible model server in the background."""
     ref = resolve_model_ref(model)
@@ -151,8 +195,27 @@ def serve_model(
             fg=typer.colors.RED,
         )
         raise typer.Exit(code=1)
+    if vision_tokens is not None and vision_tokens not in _VISION_SOFT_TOKENS_SUPPORTED:
+        typer.secho(
+            f"--vision-tokens must be one of {_VISION_SOFT_TOKENS_SUPPORTED}.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
     _require_local_extra()
     alias, repo = ref
+    tokens = vision_tokens
+    if tokens is None:
+        tokens = LOCAL_MODELS[alias].vision_soft_tokens if alias in LOCAL_MODELS else None
+    if tokens is not None:
+        if _apply_vision_soft_tokens(repo, tokens):
+            typer.secho(f"Vision soft tokens per image: {tokens}", fg=typer.colors.CYAN)
+        else:
+            typer.secho(
+                "Could not set the vision-token budget (model not pulled, or its "
+                "processor has no max_soft_tokens); serving the model default. "
+                "Run `artemis model pull` first.",
+                fg=typer.colors.YELLOW,
+            )
     existing = _read_state(port)
     if existing and _pid_alive(int(existing.get("pid", -1))):
         typer.secho(
