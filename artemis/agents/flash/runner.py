@@ -77,6 +77,7 @@ from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.data_engine.trace import trace
 from artemis.graph.perception import _check_injected_instruction_file
 from artemis.graph.state import State
+from artemis.llm.router import ModelProvider
 from artemis.llm.structured import ParseFailure, parse_structured
 from artemis.mcp.action_executor import McpActionExecutor
 from artemis.utils.image_codec import image_data_uri
@@ -104,6 +105,59 @@ _NO_TOOL_CALL_NOTICE = (
     "You did not call any tools last turn. Please make progress by calling an"
     " action tool or 'report_task_status'."
 )
+
+# Hard ceiling on consecutive narration-only turns. Some local VLMs (e.g.
+# Gemma 4 E4B under mlx_vlm) can fall into an apology loop — seeing the
+# goal, narrating a plan, never emitting a tool call — and with an
+# unlimited turn budget that loop never exits on its own.
+_MAX_CONSECUTIVE_NO_TOOL_CALLS = 8
+
+# Gemma-family tool-call envelopes observed in the wild: the model emits
+# `call:<name>{<args>}` and some servers (mlx_vlm) wrap it into a function
+# literally named "call" whose arguments are the unparseable remainder, or
+# the envelope leaks into text content.
+_GEMMA_CALL_RE = re.compile(r"(?:<\|?tool_call\|?>?\s*)?call:([a-zA-Z_]\w*)\s*\{")
+_GEMMA_ENVELOPED_RE = re.compile(r'\s*\{?\s*"?([a-zA-Z_]\w*)"?\s*\{')
+_GEMMA_QUOTE_RE = re.compile(r'<\|\\?\"\|>')
+
+
+def _loads_relaxed_args(raw: str):
+    """Best-effort JSON parse of a mangled Gemma `name{key:value}` args object."""
+    s = raw.strip()
+    s = _GEMMA_QUOTE_RE.sub('"', s)
+    # Quote bare keys: {key: -> {"key": and ,key: -> ,"key":
+    s = re.sub(r'([{,])\s*"?([a-zA-Z_]\w*)"?\s*:', r'\1"\2":', s)
+    try:
+        return json.loads(s)
+    except ValueError:
+        return None
+
+
+def _parse_call_syntax(raw: str, match=None):
+    """Recovers `name{args}` at ``match`` — `call:name{...}` or `{name{...}`."""
+    if match is None:
+        match = _GEMMA_ENVELOPED_RE.match(raw)
+        if not match:
+            return None
+    name = match.group(1)
+    start = match.end() - 1  # opening '{' of the args object
+    args = None
+    depth = 0
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                args = _loads_relaxed_args(raw[start:i + 1])
+                break
+    if depth:
+        args = _loads_relaxed_args(raw[start:] + '}')
+    if not isinstance(args, dict):
+        return None
+    return {"name": name, "args": args, "id": str(uuid.uuid4())}
+
 
 _FINAL_TURN_WARNING = "[WARNING] This is your final turn; only 'report_task_status' is available."
 
@@ -537,7 +591,39 @@ class FlashRunner:
                         "id": str(uuid.uuid4()),
                     }
                 ]
+
+        # Local-server envelope repair: mlx_vlm can wrap the model's native
+        # `call:name{args}` output into a function literally named "call" whose
+        # arguments are the unparseable remainder — langchain then drops it to
+        # invalid_tool_calls and the call is silently lost.
+        if not tool_calls:
+            tool_calls = self._repair_enveloped_tool_calls(
+                getattr(response, "invalid_tool_calls", None)
+            )
+
+        # Same envelope can leak into text content outright.
+        if not tool_calls and raw_text:
+            call_match = _GEMMA_CALL_RE.search(raw_text)
+            if call_match:
+                repaired = _parse_call_syntax(raw_text, match=call_match)
+                if repaired:
+                    tool_calls = [repaired]
         return tool_calls
+
+    @staticmethod
+    def _repair_enveloped_tool_calls(invalid_tool_calls) -> list:
+        """Recovers calls mangled into `name="call"` + raw `name{args}` args."""
+        repaired = []
+        for tc in invalid_tool_calls or []:
+            name = tc.get("name")
+            raw_args = tc.get("args")
+            if name != "call" or not isinstance(raw_args, str):
+                continue
+            parsed = _parse_call_syntax(raw_args)
+            if parsed:
+                parsed["id"] = tc.get("id") or parsed["id"]
+                repaired.append(parsed)
+        return repaired
 
     # ------------------------------------------------------------------
     # Per-tool-call helpers (act / record / report)
@@ -889,8 +975,16 @@ class FlashRunner:
         # Keep only the latest screenshot: strict gateways cap images per
         # request, and earlier frames are stale context anyway.
         self._prune_intermediate_screenshots(messages)
-        # Bind active tools
-        bound_llm = llm.bind_tools(current_tools)
+        # Bind active tools. Local OpenAI-compatible servers (mlx_vlm and
+        # friends) may let the model answer with narration only, which the
+        # loop reads as a no-progress turn; tool_choice="required" holds the
+        # provider to the loop's contract that every turn is a tool call.
+        endpoint = getattr(llm, "endpoint", None)
+        provider = getattr(endpoint, "provider", None)
+        if provider == ModelProvider.CUSTOM:
+            bound_llm = llm.bind_tools(current_tools, tool_choice="required")
+        else:
+            bound_llm = llm.bind_tools(current_tools)
 
         # Invoke Model. Streaming, live-token UI deltas, classified
         # retries, and pause/resume are all owned by the LLM gateway
@@ -1064,6 +1158,7 @@ class FlashRunner:
         current_xml_list = xml_list
         previous_turn: _TurnRecord | None = None
         pending_notices: list[str] = []
+        no_tool_call_streak = 0
 
         while limit is None or turns < limit:
             turns += 1
@@ -1139,10 +1234,23 @@ class FlashRunner:
                 if is_final:
                     final_report = {"status": "failed", "explanation": raw_text}
                     break
+                no_tool_call_streak += 1
+                if no_tool_call_streak >= _MAX_CONSECUTIVE_NO_TOOL_CALLS:
+                    final_report = {
+                        "status": "failed",
+                        "explanation": (
+                            f"Stopped after {no_tool_call_streak} consecutive responses"
+                            " without a tool call; the model kept narrating instead"
+                            " of acting."
+                        ),
+                    }
+                    break
                 pending_notices.append(_NO_TOOL_CALL_NOTICE)
                 ledger.stage_turn(messages[turn_base:])
                 previous_turn = _TurnRecord()
                 continue
+
+            no_tool_call_streak = 0
 
             # Process tool calls
             turn = _TurnRecord()
