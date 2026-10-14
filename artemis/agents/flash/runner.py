@@ -79,11 +79,13 @@ from artemis.graph.perception import _check_injected_instruction_file
 from artemis.graph.state import State
 from artemis.llm.router import ModelProvider
 from artemis.llm.structured import ParseFailure, parse_structured
+from artemis.core.decision_client import DecisionClient
 from artemis.mcp.action_executor import McpActionExecutor
 from artemis.utils.image_codec import image_data_uri
 from artemis.mcp.observation import observe
 from artemis.memory.transcript import PRO_UI_LIST_MARKER, TranscriptLedger, mark_ephemeral
 from artemis.services.llm import (
+    LLMCallError,
     RobustChatModelWrapper,
     acomplete,
     get_google_llm,
@@ -160,6 +162,57 @@ def _parse_call_syntax(raw: str, match=None):
 
 
 _FINAL_TURN_WARNING = "[WARNING] This is your final turn; only 'report_task_status' is available."
+
+# Hybrid Flash loop (decision.flash_loop): the VLM perceives, the typed
+# decision model acts. The describe call carries NO tool declarations, so
+# the tool-call envelope syntax that local VLMs mangle can never be
+# emitted; action selection is a fixed-space `choose` over the live
+# element list plus meta-actions instead.
+_HYBRID_PLAN_PROMPT = """You are the planning stage of a UI testing agent.
+GOAL: $goal
+
+Decompose the goal into 3-8 short ordered milestones (one per line, starting
+with '- '). Each milestone names a screen state or interaction step, not a
+tool call. Output only the milestone list."""
+
+_HYBRID_DESCRIBE_PROMPT = """You are the perception stage of a UI testing agent.
+GOAL: $goal
+PLAN:
+$plan
+
+Describe the CURRENT screenshot factually in 3-5 short sentences: which app
+and screen is shown, what has changed since the previous observation, and
+where the elements relevant to the goal sit. For every element relevant to
+the goal give one line: [index] label ~[x,y] — the index from the attached
+element list when the element is listed there, and a normalized 0-1000
+[x,y] coordinate only when it is visible on screen but NOT in the list.
+Never claim an action was taken. Do not decide what to do next — a separate
+decision stage reads your description."""
+
+# Menu entries the decision model may always pick, alongside the element
+# taps generated from the live index list. Free-text input is excluded by
+# design: a fixed answer space cannot produce the text to type, so a goal
+# that needs text input escalates to the standard tool-calling turn.
+_HYBRID_META_ACTIONS = {
+    "swipe_up": "scroll the screen up to reveal content below",
+    "swipe_down": "scroll the screen down to reveal content above",
+    "swipe_left": "swipe left (e.g. carousel, page forward)",
+    "swipe_right": "swipe right (e.g. carousel, page back)",
+    "press_back": "press the Android back button",
+    "press_home": "press the Android home button",
+    "wait": "wait briefly for the screen to settle or load",
+    "done": "the goal is satisfied — finish the task as completed",
+    "fail": "the goal cannot be achieved from here — finish as failed",
+}
+
+# Cap on element-tap entries in the decision menu: the decision model's
+# context is short (~512-1024 tokens) and taps beyond the first screenful
+# are rarely the right action anyway.
+_HYBRID_MAX_MENU_ELEMENTS = 15
+
+# Distilled state sent to the decision model is capped for the same reason:
+# goal + plan + screen description, truncated tail-first.
+_HYBRID_MAX_STATE_CHARS = 2000
 
 
 @dataclass
@@ -341,6 +394,169 @@ class FlashRunner:
             logger.warning(f"Failed to get operator LLM from config, using default: {e}")
 
             return RobustChatModelWrapper(get_google_llm(model_name="gemini-2.5-flash"), self.ctx)
+
+    # ------------------------------------------------------------------
+    # Hybrid loop (decision.flash_loop): VLM describes, decision model acts
+    # ------------------------------------------------------------------
+
+    async def _hybrid_plan(self, llm) -> str | None:
+        """The one upfront planning call — Pro's planner leg grafted into Flash.
+
+        A plain completion (no tools): the VLM emits a milestone list that the
+        per-turn describe prompt carries as context. Failure is non-fatal — the
+        loop still runs, just without plan guidance.
+        """
+        prompt = Template(_HYBRID_PLAN_PROMPT).render(goal=self.goal)
+        try:
+            response = await invoke_llm_with_timeout_message(
+                acomplete(llm, [HumanMessage(content=prompt)]),
+                timeout_seconds=10,
+                hard_timeout=settings.LLM_FLASH_HARD_TIMEOUT_SECONDS,
+            )
+        except LLMCallError as e:
+            logger.warning(f"Hybrid plan call failed, running unplanned: {e}")
+            return None
+        plan = self._extract_response_text(response).strip()
+        logger.info(f"Hybrid plan ({len(plan)} chars): {plan[:200]}")
+        return plan or None
+
+    @staticmethod
+    def _hybrid_action_menu(state: State) -> dict[str, str]:
+        """The fixed action menu for one turn: element taps + meta-actions.
+
+        Tap keys embed the element index of the CURRENT observation's list —
+        index drift across turns is impossible because the menu is rebuilt
+        every turn and the executor resolves the index against the same list
+        snapshot the decision was made on.
+        """
+        elements = getattr(state, "indexed_elements", None) or []
+        menu: dict[str, str] = {}
+        for el in elements[:_HYBRID_MAX_MENU_ELEMENTS]:
+            idx = el.get("index")
+            if idx is None:
+                continue
+            label = (
+                el.get("text")
+                or el.get("content_desc")
+                or el.get("resource_id")
+                or el.get("class_name")
+                or "element"
+            )
+            menu[f"tap_{idx}"] = f"tap element {idx}: {str(label)[:60]}"
+        menu.update(_HYBRID_META_ACTIONS)
+        return menu
+
+    @staticmethod
+    def _menu_choice_to_call(choice: str, description: str) -> dict | None:
+        """Maps a menu key to a tool-call dict for the normal execution path."""
+        tid = f"call_{uuid.uuid4().hex[:8]}"
+        if choice.startswith("tap_"):
+            try:
+                idx = int(choice[len("tap_"):])
+            except ValueError:
+                return None
+            return {"id": tid, "name": "click", "args": {"target": idx}}
+        if choice in ("swipe_up", "swipe_down", "swipe_left", "swipe_right"):
+            return {
+                "id": tid,
+                "name": "swipe",
+                "args": {"direction": choice.split("_", 1)[1]},
+            }
+        if choice in ("press_back", "press_home"):
+            return {
+                "id": tid,
+                "name": "press_key",
+                "args": {"key": "back" if choice == "press_back" else "home"},
+            }
+        if choice == "wait":
+            return {"id": tid, "name": "wait_for_delay", "args": {"timeout_ms": 1500}}
+        if choice in ("done", "fail"):
+            return {
+                "id": tid,
+                "name": "report_task_status",
+                "args": {
+                    "status": "completed" if choice == "done" else "failed",
+                    "explanation": description[:500] or "Decision layer verdict.",
+                },
+            }
+        return None
+
+    async def _hybrid_decide(
+        self,
+        llm,
+        state: State,
+        tail: HumanMessage,
+        plan_text: str | None,
+        cfg,
+    ) -> tuple | None:
+        """One hybrid turn: describe → choose → tool call.
+
+        Returns ``(describe_response, [tool_call])`` on a confident decision,
+        ``None`` to escalate to the standard tool-calling model turn. The
+        describe call binds no tools — the VLM answers with a screen
+        narrative (plus approximate coords for unlisted targets) that becomes
+        the turn's thought text, so envelope-mangling and narration-only
+        stalls cannot occur on this path.
+        """
+        describe_prompt = Template(_HYBRID_DESCRIBE_PROMPT).render(
+            goal=self.goal, plan=plan_text or "(no plan — describe and list elements)"
+        )
+        try:
+            response = await invoke_llm_with_timeout_message(
+                acomplete(llm, [SystemMessage(content=describe_prompt), tail]),
+                timeout_seconds=10,
+                hard_timeout=settings.LLM_FLASH_HARD_TIMEOUT_SECONDS,
+            )
+        except LLMCallError as e:
+            logger.warning(f"Hybrid describe call failed, escalating: {e}")
+            return None
+        description = self._extract_response_text(response)
+        logger.info(f"Hybrid describe: {description[:200]}")
+
+        menu = self._hybrid_action_menu(state)
+        client = DecisionClient(
+            cfg.url, model=cfg.model, timeout_seconds=cfg.timeout_seconds
+        )
+        state_text = (
+            f"Goal: {self.goal}\n"
+            f"Plan: {plan_text or 'none'}\n"
+            f"Current screen: {description}"
+        )
+        verdict = await client.achoose(
+            state_text[-_HYBRID_MAX_STATE_CHARS:],
+            "Which single action moves the task forward?",
+            menu,
+        )
+        if (
+            not verdict.answered
+            or verdict.confidence < cfg.confidence_threshold
+            or verdict.verdict not in menu
+        ):
+            logger.info(
+                f"Hybrid decision inconclusive (verdict={verdict.verdict!r} "
+                f"confidence={verdict.confidence:.2f}), escalating to tool-call turn"
+            )
+            return None
+        tool_call = self._menu_choice_to_call(str(verdict.verdict), description)
+        if tool_call is None:
+            return None
+        logger.info(
+            f"Hybrid decision: {tool_call['name']} "
+            f"(confidence {verdict.confidence:.2f})"
+        )
+        # Stamp the chosen call onto the describe message: the ToolMessages the
+        # executor appends then have a legitimate parent tool_call, which strict
+        # providers require when the ledger replays them into later prompts.
+        response.tool_calls = [
+            {
+                "name": tool_call["name"],
+                "args": tool_call["args"],
+                "id": tool_call["id"],
+                "type": "tool_call",
+            }
+        ]
+        response.invalid_tool_calls = []
+        return response, [tool_call]
 
     def _render_system_prompt(self, tools_declaration: list) -> str:
         """Renders the system prompt from the flash_runner.md template.
@@ -1146,6 +1362,20 @@ class FlashRunner:
         llm = self._init_llm()
         self._llm = llm
 
+        # Hybrid loop (decision.flash_loop): VLM describes, a typed decision
+        # model picks the action. Both flags must be on; a missing/unreachable
+        # decision endpoint escalates per-turn to the standard tool-call path.
+        decision_cfg = getattr(getattr(self.ctx, "agent_config", None), "decision", None)
+        hybrid = bool(
+            decision_cfg
+            and getattr(decision_cfg, "enabled", False)
+            and getattr(decision_cfg, "flash_loop", False)
+        )
+        plan_text = None
+        if hybrid:
+            logger.info("Hybrid Flash loop enabled: VLM describes, decision model acts.")
+            plan_text = await self._hybrid_plan(llm)
+
         tools_declaration = self._get_tools()
         report_only_tools = [t for t in tools_declaration if t.name == "report_task_status"]
 
@@ -1198,7 +1428,19 @@ class FlashRunner:
             turn_base = len(messages) - 1
             current_tools = report_only_tools if is_final else tools_declaration
 
-            response = await self._invoke_model(llm, current_tools, messages)
+            # Hybrid turn: describe → decision-model action pick. The final
+            # turn stays on the standard path (report_task_status only).
+            response = None
+            tool_calls = None
+            if hybrid and not is_final:
+                decided = await self._hybrid_decide(
+                    llm, state, tail, plan_text, decision_cfg
+                )
+                if decided is not None:
+                    response, tool_calls = decided
+
+            if response is None:
+                response = await self._invoke_model(llm, current_tools, messages)
 
             if response is None:
                 break
@@ -1224,7 +1466,8 @@ class FlashRunner:
 
             self._record_llm_trace(step_token_usage, raw_text)
 
-            tool_calls = self._resolve_tool_calls(response, raw_text)
+            if tool_calls is None:
+                tool_calls = self._resolve_tool_calls(response, raw_text)
 
             if not tool_calls:
                 logger.info(

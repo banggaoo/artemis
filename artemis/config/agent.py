@@ -187,6 +187,15 @@ class DecisionLayerConfig(BaseModel):
         default=True,
         description="Offload the advisory planner milestone review to the decision layer.",
     )
+    flash_loop: bool = Field(
+        default=False,
+        description=(
+            "Hybrid Flash loop: the VLM describes the screen (text only, no tool "
+            "calls), the decision model picks the next action from a fixed menu "
+            "built on the live element list. Off → the VLM emits tool calls "
+            "directly (upstream behavior)."
+        ),
+    )
     model_config = {"extra": "allow"}
 
 

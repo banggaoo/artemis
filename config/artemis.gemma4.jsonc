@@ -301,7 +301,13 @@
       "model": "laya",
       "confidence_threshold": 0.85,
       "timeout_seconds": 5.0,
-      "planner_validation": true  // offload the advisory milestone review first
+      "planner_validation": true, // offload the advisory milestone review first
+      // Hybrid Flash loop: Gemma plans once, then per turn describes the
+      // screen (text only — no tool-call envelopes to mangle), and the
+      // decision model picks the next action from a fixed menu of element
+      // taps + meta-actions. Inconclusive/low-confidence verdicts escalate
+      // to the standard tool-call turn.
+      "flash_loop": false
     },
     // 🧭 Explorer tier: the perception sub-agent behind `ask_explorer`.
     // Tiers are a user setting; calling agents never see which tier is active.

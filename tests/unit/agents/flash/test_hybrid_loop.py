@@ -1,0 +1,241 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Hybrid Flash loop (decision.flash_loop): VLM describes, decision model acts.
+
+The describe call binds no tools, so malformed tool-call envelopes cannot be
+emitted; the decision model picks from a fixed menu (element taps +
+meta-actions). Any inconclusive verdict — unreachable endpoint, low
+confidence, or a key outside the menu — escalates to the standard
+tool-calling model turn.
+"""
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage
+
+from artemis.agents.flash.runner import FlashRunner, _HYBRID_META_ACTIONS
+from artemis.core.decision_client import DecisionResult
+from artemis.llm.reliability import Failure, FailureCategory, LLMCallError
+
+
+_FAILURE = Failure(FailureCategory.UNKNOWN, retryable=True, should_fallback=True)
+
+
+def _runner() -> FlashRunner:
+    r = FlashRunner.__new__(FlashRunner)
+    r.goal = "enable dark theme"
+    return r
+
+
+def _cfg(threshold: float = 0.85):
+    return SimpleNamespace(
+        url="http://127.0.0.1:11434/v1/decide",
+        model="laya",
+        timeout_seconds=5.0,
+        confidence_threshold=threshold,
+    )
+
+
+def _state(elements):
+    return SimpleNamespace(indexed_elements=elements)
+
+
+def _verdict(verdict, confidence=0.9):
+    return DecisionResult(verdict=verdict, confidence=confidence)
+
+
+# --- action menu --------------------------------------------------------------
+
+
+def test_menu_lists_element_taps_and_meta_actions():
+    state = _state(
+        [
+            {"index": 1, "text": "Settings"},
+            {"index": 2, "content_desc": "Search"},
+            {"index": 3, "resource_id": "id/more"},
+        ]
+    )
+    menu = FlashRunner._hybrid_action_menu(state)
+    assert menu["tap_1"] == "tap element 1: Settings"
+    assert menu["tap_2"] == "tap element 2: Search"
+    assert menu["tap_3"] == "tap element 3: id/more"
+    for key in _HYBRID_META_ACTIONS:
+        assert key in menu
+
+
+def test_menu_handles_missing_elements():
+    assert "done" in FlashRunner._hybrid_action_menu(_state(None))
+    assert "tap_" not in " ".join(FlashRunner._hybrid_action_menu(_state(None)))
+
+
+# --- menu -> tool call mapping -------------------------------------------------
+
+
+def test_choice_maps_element_tap_to_click():
+    call = FlashRunner._menu_choice_to_call("tap_4", "desc")
+    assert call["name"] == "click"
+    assert call["args"] == {"target": 4}
+    assert call["id"]
+
+
+def test_choice_maps_swipe_and_keys():
+    assert FlashRunner._menu_choice_to_call("swipe_up", "")["args"] == {
+        "direction": "up"
+    }
+    back = FlashRunner._menu_choice_to_call("press_back", "")
+    assert back["name"] == "press_key" and back["args"] == {"key": "back"}
+
+
+def test_choice_maps_done_and_fail_to_report():
+    done = FlashRunner._menu_choice_to_call("done", "all set")
+    assert done["name"] == "report_task_status"
+    assert done["args"]["status"] == "completed"
+    assert done["args"]["explanation"] == "all set"
+    fail = FlashRunner._menu_choice_to_call("fail", "blocked")
+    assert fail["args"]["status"] == "failed"
+
+
+def test_choice_rejects_unknown_key():
+    assert FlashRunner._menu_choice_to_call("launch_rocket", "") is None
+
+
+# --- _hybrid_decide ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_hybrid_decide_returns_call_on_confident_verdict():
+    runner = _runner()
+    state = _state([{"index": 1, "text": "Display"}])
+    describe_resp = AIMessage(content="Settings list; [1] Display ~[500,300]")
+
+    with (
+        patch(
+            "artemis.agents.flash.runner.acomplete",
+            new=AsyncMock(return_value=describe_resp),
+        ),
+        patch("artemis.agents.flash.runner.DecisionClient") as MockClient,
+    ):
+        MockClient.return_value.achoose = AsyncMock(
+            return_value=_verdict("tap_1")
+        )
+        out = await runner._hybrid_decide(
+            AsyncMock(), state, HumanMessage(content="obs"), "plan", _cfg()
+        )
+
+    assert out is not None
+    response, tool_calls = out
+    assert tool_calls[0]["name"] == "click"
+    assert tool_calls[0]["args"] == {"target": 1}
+    # The choice is stamped onto the describe message so ToolMessages keep a
+    # legitimate parent when the ledger replays them.
+    assert response.tool_calls[0]["name"] == "click"
+    # The describe response is pure text — no envelope parsing needed.
+    assert "Settings list" in response.content
+
+
+@pytest.mark.asyncio
+async def test_hybrid_decide_escalates_on_low_confidence():
+    runner = _runner()
+    with (
+        patch(
+            "artemis.agents.flash.runner.acomplete",
+            new=AsyncMock(return_value=AIMessage(content="desc")),
+        ),
+        patch("artemis.agents.flash.runner.DecisionClient") as MockClient,
+    ):
+        MockClient.return_value.achoose = AsyncMock(
+            return_value=_verdict("tap_1", confidence=0.40)
+        )
+        out = await runner._hybrid_decide(
+            AsyncMock(), _state([{"index": 1}]), HumanMessage(content="x"), None, _cfg()
+        )
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_hybrid_decide_escalates_when_unanswered():
+    runner = _runner()
+    with (
+        patch(
+            "artemis.agents.flash.runner.acomplete",
+            new=AsyncMock(return_value=AIMessage(content="desc")),
+        ),
+        patch("artemis.agents.flash.runner.DecisionClient") as MockClient,
+    ):
+        MockClient.return_value.achoose = AsyncMock(
+            return_value=DecisionResult(verdict=None)
+        )
+        out = await runner._hybrid_decide(
+            AsyncMock(), _state([]), HumanMessage(content="x"), None, _cfg()
+        )
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_hybrid_decide_escalates_on_out_of_menu_verdict():
+    runner = _runner()
+    with (
+        patch(
+            "artemis.agents.flash.runner.acomplete",
+            new=AsyncMock(return_value=AIMessage(content="desc")),
+        ),
+        patch("artemis.agents.flash.runner.DecisionClient") as MockClient,
+    ):
+        MockClient.return_value.achoose = AsyncMock(
+            return_value=_verdict("tap_99", confidence=0.95)
+        )
+        out = await runner._hybrid_decide(
+            AsyncMock(), _state([]), HumanMessage(content="x"), None, _cfg()
+        )
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_hybrid_decide_escalates_on_describe_failure():
+    runner = _runner()
+    with patch(
+        "artemis.agents.flash.runner.acomplete",
+        new=AsyncMock(side_effect=LLMCallError("server down", failure=_FAILURE)),
+    ):
+        out = await runner._hybrid_decide(
+            AsyncMock(), _state([]), HumanMessage(content="x"), None, _cfg()
+        )
+    assert out is None
+
+
+# --- _hybrid_plan --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_hybrid_plan_returns_milestone_text():
+    runner = _runner()
+    with patch(
+        "artemis.agents.flash.runner.acomplete",
+        new=AsyncMock(return_value=AIMessage(content="- open Settings\n- tap Display")),
+    ):
+        plan = await runner._hybrid_plan(AsyncMock())
+    assert "open Settings" in plan
+
+
+@pytest.mark.asyncio
+async def test_hybrid_plan_failure_is_non_fatal():
+    runner = _runner()
+    with patch(
+        "artemis.agents.flash.runner.acomplete",
+        new=AsyncMock(side_effect=LLMCallError("boom", failure=_FAILURE)),
+    ):
+        assert await runner._hybrid_plan(AsyncMock()) is None
