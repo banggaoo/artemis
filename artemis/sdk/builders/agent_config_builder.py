@@ -54,6 +54,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         else:
             self._video_recording_tools_enabled = detect_video_tools_enabled()
         self._disable_planner_validation = not agent_cfg.planner_validation.enabled
+        self._decision = agent_cfg.decision
         self._enable_committee = agent_cfg.committee.enabled
         self._committee_debate_rounds = agent_cfg.committee.debate_rounds
         self._disable_checker = not agent_cfg.checker.enabled
@@ -439,6 +440,7 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
             "assert_failure_policy": self._assert_failure_policy,
             "disable_device_probes": self._disable_device_probes,
             "disable_planner_validation": self._disable_planner_validation,
+            "decision": self._decision,
             "enable_committee": self._enable_committee,
             "committee_debate_rounds": self._committee_debate_rounds,
             "disable_outputter": self._disable_outputter,

@@ -15,6 +15,7 @@
 from typing import Literal
 
 from artemis.config import (
+    DecisionLayerConfig,
     ExplorerConfig,
     FlashProfileConfig,
     OutputterConfig,
@@ -55,6 +56,7 @@ class AgentConfig(AgentConfigBase):
     assert_failure_policy: Literal["continue", "halt"] = "continue"
     disable_device_probes: bool = False
     disable_planner_validation: bool = False
+    decision: DecisionLayerConfig = Field(default_factory=DecisionLayerConfig)
     enable_committee: bool = False
     committee_debate_rounds: int = 2
     disable_outputter: bool = False

@@ -297,10 +297,14 @@
     // escalate to the existing model path. Text/JSON state only — no pixels.
     "decision": {
       "enabled": false,           // opt-in; off = upstream-identical behavior
-      "url": "http://127.0.0.1:11434/v1/decide",
-      "model": "laya",
+      // Jev wire API (POST /v1/systemone). `artemis model pull laya` +
+      // `artemis model serve laya -p 11435` provisions a matching server.
+      "url": "http://127.0.0.1:11435/v1/systemone",
+      "model": "typed-decisions",
       "confidence_threshold": 0.85,
-      "timeout_seconds": 5.0,
+      // Generous: laya-serve serializes requests — a stalled predecessor plus
+      // memory pressure pushes single decisions well past 5s (measured ~10-25s).
+      "timeout_seconds": 15.0,
       "planner_validation": true, // offload the advisory milestone review first
       // Hybrid Flash loop: Gemma plans once, then per turn describes the
       // screen (text only — no tool-call envelopes to mangle), and the

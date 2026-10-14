@@ -165,12 +165,20 @@ class DecisionLayerConfig(BaseModel):
         description="Master switch for the decision layer. Off = identical to upstream behavior.",
     )
     url: str = Field(
-        default="http://127.0.0.1:11434/v1/decide",
-        description="Jev/Laya-compatible decision endpoint.",
+        default="http://127.0.0.1:11435/v1/systemone",
+        description=(
+            "Jev/Laya-compatible decision endpoint (POST /v1/systemone). "
+            "`artemis model pull laya` + `artemis model serve laya -p 11435` "
+            "provisions a matching local server."
+        ),
     )
     model: str | None = Field(
-        default="laya",
-        description="Decision model name sent in the request payload, if the endpoint uses it.",
+        default="typed-decisions",
+        description=(
+            "Checkpoint name sent in the request payload — laya-serve honors "
+            "its own checkpoint names ('typed-decisions', 'english', "
+            "'multilingual')."
+        ),
     )
     confidence_threshold: float = Field(
         default=0.85,
@@ -194,6 +202,16 @@ class DecisionLayerConfig(BaseModel):
             "calls), the decision model picks the next action from a fixed menu "
             "built on the live element list. Off → the VLM emits tool calls "
             "directly (upstream behavior)."
+        ),
+    )
+    flash_choice_threshold: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Min top-pick probability (answer_confidence) for a hybrid action-menu "
+            "pick to be acted on. Menus carry ~20 options, so 0.25 is roughly 5x "
+            "uniform; below the floor the turn escalates to the VLM tool path."
         ),
     )
     model_config = {"extra": "allow"}

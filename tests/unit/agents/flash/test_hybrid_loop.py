@@ -158,12 +158,37 @@ async def test_hybrid_decide_escalates_on_low_confidence():
         patch("artemis.agents.flash.runner.DecisionClient") as MockClient,
     ):
         MockClient.return_value.achoose = AsyncMock(
-            return_value=_verdict("tap_1", confidence=0.40)
+            return_value=_verdict("tap_1", confidence=0.10)
         )
         out = await runner._hybrid_decide(
             AsyncMock(), _state([{"index": 1}]), HumanMessage(content="x"), None, _cfg()
         )
     assert out is None
+
+
+@pytest.mark.asyncio
+async def test_hybrid_decide_gates_on_answer_confidence_not_trust_score():
+    """laya-serve returns near-zero `confidence` on menu-shaped spreads;
+    the actionable signal is `answer_confidence` (top-pick probability)."""
+    runner = _runner()
+    verdict = DecisionResult(
+        verdict="tap_1",
+        confidence=0.008,  # calibrated trust score — near zero
+        raw={"answer_confidence": 0.62},
+    )
+    with (
+        patch(
+            "artemis.agents.flash.runner.acomplete",
+            new=AsyncMock(return_value=AIMessage(content="desc")),
+        ),
+        patch("artemis.agents.flash.runner.DecisionClient") as MockClient,
+    ):
+        MockClient.return_value.achoose = AsyncMock(return_value=verdict)
+        out = await runner._hybrid_decide(
+            AsyncMock(), _state([{"index": 1}]), HumanMessage(content="x"), None, _cfg()
+        )
+    assert out is not None
+    assert out[1][0]["name"] == "click"
 
 
 @pytest.mark.asyncio

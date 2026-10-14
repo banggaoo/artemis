@@ -527,22 +527,32 @@ class FlashRunner:
             "Which single action moves the task forward?",
             menu,
         )
+        # For `choice` answers the decision gate is the top-pick probability
+        # (answer_confidence): the calibrated `confidence` field measures overall
+        # answer trustworthiness and sits near zero on any menu-shaped spread —
+        # using it would escalate every turn.
+        top_p = verdict.confidence
+        raw = getattr(verdict, "raw", None) or {}
+        try:
+            top_p = float(raw.get("answer_confidence") or top_p)
+        except (TypeError, ValueError):
+            pass
+        floor = getattr(cfg, "flash_choice_threshold", 0.25)
         if (
             not verdict.answered
-            or verdict.confidence < cfg.confidence_threshold
+            or top_p < floor
             or verdict.verdict not in menu
         ):
             logger.info(
                 f"Hybrid decision inconclusive (verdict={verdict.verdict!r} "
-                f"confidence={verdict.confidence:.2f}), escalating to tool-call turn"
+                f"top_p={top_p:.2f} floor={floor:.2f}), escalating to tool-call turn"
             )
             return None
         tool_call = self._menu_choice_to_call(str(verdict.verdict), description)
         if tool_call is None:
             return None
         logger.info(
-            f"Hybrid decision: {tool_call['name']} "
-            f"(confidence {verdict.confidence:.2f})"
+            f"Hybrid decision: {tool_call['name']} (top_p={top_p:.2f})"
         )
         # Stamp the chosen call onto the describe message: the ToolMessages the
         # executor appends then have a legitimate parent tool_call, which strict
@@ -921,6 +931,33 @@ class FlashRunner:
             if obs.screenshot_path:
                 state.latest_screenshot = obs.screenshot_path
         return post_img_bytes
+
+    async def _refresh_idle_observation(
+        self, state: State | None, img_bytes, xml_list
+    ):
+        """Re-observes the screen after a turn that executed no device action.
+
+        Turns that end without a tool call never reach the post-action
+        capture in ``_process_tool_calls``; without this the next turn's tail
+        (and the hybrid decision menu built from ``state.indexed_elements``)
+        would describe a stale frame — e.g. one captured mid-transition.
+        """
+        try:
+            obs, screenshot_bytes = await observe(self.ctx, self.controller, settle_ms=0)
+        except Exception as obs_err:
+            logger.warning(f"Idle-turn re-observation failed: {obs_err}")
+            return img_bytes, xml_list
+        if not obs.ok:
+            return img_bytes, xml_list
+        if state is not None:
+            if obs.hierarchy_ok:
+                state.indexed_points = [el["center"] for el in obs.elements]
+                state.indexed_elements = obs.elements
+            if obs.screenshot_path:
+                state.latest_screenshot = obs.screenshot_path
+        if obs.elements_text:
+            xml_list = obs.elements_text
+        return screenshot_bytes or img_bytes, xml_list
 
     def _extract_normalized_coordinates(self, name: str, args: dict, resolved=None):
         """Extracts and enriches coordinate metadata for the recorded action.
@@ -1489,6 +1526,18 @@ class FlashRunner:
                     }
                     break
                 pending_notices.append(_NO_TOOL_CALL_NOTICE)
+                # No action ran, so nothing refreshes the observation — but
+                # the current frame may be a mid-transition capture (the prior
+                # action's post-screenshot raced a screen animation). Re-serve
+                # that stale frame next turn and both the describe pass and
+                # the hybrid menu keep acting on the wrong screen. Re-observe
+                # here so the next tail reflects what is actually displayed.
+                (
+                    current_pre_screenshot_bytes,
+                    current_xml_list,
+                ) = await self._refresh_idle_observation(
+                    state, current_pre_screenshot_bytes, current_xml_list
+                )
                 ledger.stage_turn(messages[turn_base:])
                 previous_turn = _TurnRecord()
                 continue

@@ -18,7 +18,7 @@
     "timeout": 300,
     "fallback": {
       "provider": "custom",
-      "model": "qwen3.8-9b",
+      "model": "gemma4-e4b",
       "api_base": "http://127.0.0.1:8080/v1",
       "timeout": 300
     }
@@ -187,6 +187,22 @@
         "model": "gemini-3.5-flash-lite", // Lightweight model for fast background inference
         "prune_history_xml": true // Prune outdated heavy XML trees from historical steps
       }
+    },
+    // 🧠 Decision Layer (System One): a local decision model (Laya via
+    // `artemis model pull/serve laya`) answers cheap typed junctions in ~100ms.
+    // Advisory only — low-confidence or unreachable answers escalate to the
+    // existing model path. Text/JSON state only — no pixels.
+    "decision": {
+      "enabled": false,
+      "url": "http://127.0.0.1:11435/v1/systemone",
+      "model": "typed-decisions",
+      "confidence_threshold": 0.85,
+      "timeout_seconds": 15.0,
+      "planner_validation": false,
+      // Hybrid Flash loop: Gemma describes the screen (text only — no
+      // tool-call envelopes to mangle), Laya picks the next action from a
+      // fixed menu of element taps + meta-actions.
+      "flash_loop": false
     },
     // ==========================================================================
     // 🚀 4.2 PRO Profile Options (Deep Multi-Agent Graph Closed-Loop)

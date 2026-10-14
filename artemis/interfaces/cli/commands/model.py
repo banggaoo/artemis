@@ -22,7 +22,10 @@ managed background process exposing an OpenAI-compatible endpoint that the
 """
 
 import json
+import os
 from pathlib import Path
+import platform
+import shutil
 import signal
 import subprocess
 import sys
@@ -41,6 +44,14 @@ model_app = typer.Typer(help="Pull and serve local on-device models.")
 
 _STATE_DIR = Path.home() / ".artemis" / "local_models"
 _SERVE_TIMEOUT_S = 300.0
+
+# Laya is not an HF-weights/mlx_vlm model: `pull` provisions a managed venv
+# with the `laya[serve]` extra (the serve entry point arrived in 0.3.7), and
+# `serve` spawns `laya-serve`, which speaks TypeSafe's Jev wire API
+# (POST /v1/systemone) for the `decision.*` config layer.
+_LAYA_VENV_DIR = Path.home() / ".artemis" / "laya-venv"
+_LAYA_BIN = _LAYA_VENV_DIR / "bin" / "laya-serve"
+_LAYA_REQUIREMENT = "laya[serve]>=0.3.7"
 
 
 def _state_file(port: int) -> Path:
@@ -83,6 +94,136 @@ def _require_local_extra() -> None:
         raise typer.Exit(code=1) from e
 
 
+def _pull_laya(spec) -> None:
+    """Provision the managed laya-serve runtime: a dedicated venv holding the
+    pinned ``laya[serve]`` install, kept out of the Artemis dependency tree.
+    Model weights download on first ``serve`` (LAYA_PRELOAD warms them)."""
+    python_bin = _LAYA_VENV_DIR / "bin" / "python"
+    if _LAYA_BIN.exists():
+        typer.secho(
+            f"laya-serve already provisioned at {_LAYA_VENV_DIR}", fg=typer.colors.GREEN
+        )
+        return
+    uv = shutil.which("uv")
+    typer.secho(
+        f"Provisioning Laya runtime at {_LAYA_VENV_DIR} ({_LAYA_REQUIREMENT})...",
+        fg=typer.colors.CYAN,
+    )
+    try:
+        if uv:
+            subprocess.run(
+                [uv, "venv", "--python", "3.12", str(_LAYA_VENV_DIR)], check=True
+            )
+            subprocess.run(
+                [
+                    uv,
+                    "pip",
+                    "install",
+                    "--python",
+                    str(python_bin),
+                    _LAYA_REQUIREMENT,
+                ],
+                check=True,
+            )
+        else:
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(_LAYA_VENV_DIR)], check=True
+            )
+            subprocess.run(
+                [str(python_bin), "-m", "pip", "install", _LAYA_REQUIREMENT],
+                check=True,
+            )
+    except (subprocess.CalledProcessError, OSError) as e:
+        typer.secho(f"Laya provisioning failed: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from e
+    typer.secho(
+        f"Ready: laya-serve installed. The '{spec.checkpoint}' checkpoint "
+        "(~800 MB) downloads on first `artemis model serve laya`.",
+        fg=typer.colors.GREEN,
+    )
+
+
+def _serve_laya(alias: str, spec, host: str, port: int) -> None:
+    """Spawn ``laya-serve`` in the managed venv behind the pid-file state used
+    by `model stop`/`status`. Exposes POST /v1/systemone (Jev wire API) and
+    GET /health — point ``decision.url`` at ``http://<host>:<port>/v1/systemone``."""
+    if not _LAYA_BIN.exists():
+        typer.secho(
+            "Laya is not installed. Run `artemis model pull laya` first.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+    existing = _read_state(port)
+    if existing and _pid_alive(int(existing.get("pid", -1))):
+        typer.secho(
+            f"A server (pid {existing['pid']}) is already running on {host}:{port}.",
+            fg=typer.colors.YELLOW,
+        )
+        return
+    env = os.environ.copy()
+    # CPU is the default: measured ~1s/decision under memory pressure vs ~25s
+    # on a contended MPS. A caller-provided LAYA_DEVICE in the environment wins.
+    env.update(
+        {
+            "LAYA_HOST": host,
+            "LAYA_PORT": str(port),
+            "LAYA_MODELS": spec.checkpoint,
+            "LAYA_PRELOAD": "1",
+        }
+    )
+    env.setdefault("LAYA_DEVICE", "cpu")
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = _STATE_DIR / f"server-{port}.log"
+    typer.secho(
+        f"Starting {alias} ({spec.checkpoint}) on http://{host}:{port} — log: {log_path}",
+        fg=typer.colors.CYAN,
+    )
+    with open(log_path, "ab") as log:
+        proc = subprocess.Popen(
+            [str(_LAYA_BIN)],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=env,
+            start_new_session=True,
+        )
+    _state_file(port).write_text(
+        json.dumps(
+            {
+                "pid": proc.pid,
+                "alias": alias,
+                "repo": spec.checkpoint,
+                "host": host,
+                "port": port,
+                "kind": "laya",
+            }
+        )
+    )
+    base = f"http://{host}:{port}"
+    deadline = time.monotonic() + _SERVE_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            break
+        try:
+            resp = httpx.get(f"{base}/health", timeout=2.0)
+            if resp.status_code == 200:
+                typer.secho(
+                    f"Serving {alias} at {base}/v1/systemone (pid {proc.pid}). "
+                    f"Set decision.url to that endpoint. Stop with "
+                    f"`artemis model stop --port {port}`.",
+                    fg=typer.colors.GREEN,
+                )
+                return
+        except httpx.HTTPError:
+            pass
+        time.sleep(2.0)
+    typer.secho(
+        f"laya-serve did not become ready within {_SERVE_TIMEOUT_S:.0f}s; "
+        f"check the log at {log_path}.",
+        fg=typer.colors.RED,
+    )
+    raise typer.Exit(code=1)
+
+
 @model_app.command("list")
 def list_models() -> None:
     """List local model aliases ARTEMIS can pull and serve."""
@@ -115,8 +256,12 @@ def pull_model(
             fg=typer.colors.RED,
         )
         raise typer.Exit(code=1)
-    _require_local_extra()
     alias, repo = ref
+    spec = LOCAL_MODELS.get(alias)
+    if spec is not None and spec.kind == "laya":
+        _pull_laya(spec)
+        return
+    _require_local_extra()
     typer.secho(f"Pulling {alias} ({repo})...", fg=typer.colors.CYAN)
     try:
         from huggingface_hub import snapshot_download
@@ -201,8 +346,14 @@ def serve_model(
             fg=typer.colors.RED,
         )
         raise typer.Exit(code=1)
-    _require_local_extra()
     alias, repo = ref
+    spec = LOCAL_MODELS.get(alias)
+    if spec is not None and spec.kind == "laya":
+        if vision_tokens is not None:
+            typer.secho("--vision-tokens is ignored for laya.", fg=typer.colors.YELLOW)
+        _serve_laya(alias, spec, host, port)
+        return
+    _require_local_extra()
     tokens = vision_tokens
     if tokens is None:
         tokens = LOCAL_MODELS[alias].vision_soft_tokens if alias in LOCAL_MODELS else None
@@ -309,15 +460,19 @@ def status_model(
             fg=typer.colors.GREEN,
         )
         return
-    try:
-        resp = httpx.get(f"http://{host}:{port}/v1/models", timeout=3.0)
-        if resp.status_code == 200:
-            ids = [m.get("id") for m in resp.json().get("data", [])]
-            typer.secho(
-                f"An unmanaged server is serving {ids} on {host}:{port}.",
-                fg=typer.colors.YELLOW,
-            )
-            return
-    except httpx.HTTPError:
-        pass
+    # laya-serve speaks /health, not the OpenAI /v1/models route.
+    for probe in ("v1/models", "health"):
+        try:
+            resp = httpx.get(f"http://{host}:{port}/{probe}", timeout=3.0)
+            if resp.status_code == 200:
+                detail = ""
+                if probe == "v1/models":
+                    detail = f" serving {[m.get('id') for m in resp.json().get('data', [])]}"
+                typer.secho(
+                    f"An unmanaged server answered /{probe}{detail} on {host}:{port}.",
+                    fg=typer.colors.YELLOW,
+                )
+                return
+        except httpx.HTTPError:
+            pass
     typer.secho(f"No model server on {host}:{port}.", fg=typer.colors.RED)

@@ -35,6 +35,12 @@ class LocalModelSpec:
     # near-original detail (~1056x2352) and measurably improves detection
     # and not-found discipline. ``None`` leaves the shipped default.
     vision_soft_tokens: int | None = None
+    # Serving stack: "mlx" = HF weights via mlx_vlm.server; "laya" = the
+    # decision model's own `laya-serve` binary in a managed venv.
+    kind: str = "mlx"
+    # For kind="laya": the checkpoint name laya-serve preloads
+    # ("typed-decisions", "english", "multilingual").
+    checkpoint: str = ""
 
 
 LOCAL_MODELS: dict[str, LocalModelSpec] = {
@@ -42,6 +48,15 @@ LOCAL_MODELS: dict[str, LocalModelSpec] = {
         repo="mlx-community/gemma-4-e4b-it-4bit",
         description="Gemma 4 E4B 4-bit multimodal (tested; ~5 GB pull, ~6 GB resident)",
         vision_soft_tokens=1120,
+    ),
+    "laya": LocalModelSpec(
+        repo="laya",
+        description=(
+            "Laya decision model (typed-decisions checkpoint, ~421M, CPU/MPS) — "
+            "serves POST /v1/systemone for the decision.* layer"
+        ),
+        kind="laya",
+        checkpoint="typed-decisions",
     ),
 }
 
