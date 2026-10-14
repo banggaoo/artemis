@@ -152,6 +152,44 @@ class PlannerValidationConfig(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class DecisionLayerConfig(BaseModel):
+    """System-One decision layer: cheap typed junctions (noul/choice/score)
+    answered by a local decision model (e.g. Laya) instead of a full LLM call.
+
+    Every junction is advisory — a decision-layer miss or low-confidence
+    answer always escalates to the existing model path, never rolls back.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Master switch for the decision layer. Off = identical to upstream behavior.",
+    )
+    url: str = Field(
+        default="http://127.0.0.1:11434/v1/decide",
+        description="Jev/Laya-compatible decision endpoint.",
+    )
+    model: str | None = Field(
+        default="laya",
+        description="Decision model name sent in the request payload, if the endpoint uses it.",
+    )
+    confidence_threshold: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        description="Answers below this confidence escalate to the LLM path.",
+    )
+    timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="Per-request decision timeout; expiry escalates to the LLM path.",
+    )
+    planner_validation: bool = Field(
+        default=True,
+        description="Offload the advisory planner milestone review to the decision layer.",
+    )
+    model_config = {"extra": "allow"}
+
+
 class CommitteeConfig(BaseModel):
     """Configuration specific to Multi-Agent Committee / Council."""
 
@@ -879,6 +917,10 @@ class AgentGlobalConfig(BaseModel):
             ' {"validator": "ultra"}). Empty by default so that'
             " ``explorer.flash_mode`` / ``explorer.pro_mode`` decide."
         ),
+    )
+    decision: DecisionLayerConfig = Field(
+        default_factory=DecisionLayerConfig,
+        description="System-One decision layer (Laya/Jev) offloading cheap typed junctions.",
     )
     planner_validation: PlannerValidationConfig = Field(
         default_factory=PlannerValidationConfig,

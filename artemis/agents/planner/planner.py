@@ -84,6 +84,56 @@ def validate_plan_format(content: str) -> tuple[bool, str]:
     return True, ""
 
 
+async def _try_decision_layer(
+    ctx: ArtemisContext,
+    initial_goal: str,
+    content_before: str,
+    content_after: str,
+) -> dict | None:
+    """Asks the decision layer for the milestone review verdict.
+
+    Returns the ``{"status", "feedback"}`` dict when the endpoint answers at
+    or above the configured confidence threshold; ``None`` to escalate to
+    the LLM path. State is text-distilled (goal + plan diff) — decision
+    models take no pixels.
+    """
+    agent_config = getattr(ctx, "agent_config", None)
+    cfg = getattr(agent_config, "decision", None)
+    if not cfg or not cfg.enabled or not getattr(cfg, "planner_validation", True):
+        return None
+    from artemis.core.decision_client import DecisionClient
+
+    state = (
+        f"Goal: {initial_goal[:500]}\n"
+        f"Plan before: {content_before[:800]}\n"
+        f"Plan after: {content_after[:800]}"
+    )
+    client = DecisionClient(
+        url=cfg.url, model=cfg.model, timeout_seconds=cfg.timeout_seconds
+    )
+    result = await client.anoul(
+        state,
+        "Is the revised plan coherent with the goal and strictly better than "
+        "the previous plan (no lost milestones, no contradictory steps)?",
+    )
+    if not result.answered or result.confidence < cfg.confidence_threshold:
+        logger.info(
+            "Decision layer escalated planner validation "
+            f"(answered={result.answered}, confidence={result.confidence:.2f})"
+        )
+        return None
+    verdict = bool(result.verdict)
+    logger.info(f"Decision layer answered planner validation: {verdict} (confidence {result.confidence:.2f})")
+    return {
+        "status": "success" if verdict else "failed",
+        "feedback": (
+            "Decision-layer review "
+            f"({'approved' if verdict else 'flagged'}, "
+            f"confidence {result.confidence:.2f})."
+        ),
+    }
+
+
 def _check_gates(ctx: ArtemisContext) -> tuple[bool, bool]:
     """(midway_checks, final_check): the two check gates, read separately so
     the planner is taught the judgment moment that actually applies. With both
@@ -183,6 +233,14 @@ async def run_async_planner_validation(
             SystemMessage(content=system_message),
             HumanMessage(content=human_message),
         ]
+
+        # Decision layer: a local decision model (Laya/Jev) can answer the
+        # advisory yes/no in ~100ms instead of a full LLM turn. Below the
+        # confidence threshold — or any endpoint failure — fall through to
+        # the existing model path.
+        decision_answer = await _try_decision_layer(ctx, initial_goal, content_before, content_after)
+        if decision_answer is not None:
+            return decision_answer
 
         # Advisory review on the lightweight judge node (shared default with
         # the pixel safety net), never the heavyweight Planner model.

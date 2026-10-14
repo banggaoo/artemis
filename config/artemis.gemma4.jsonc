@@ -290,6 +290,19 @@
       "enabled": true, // Whether Outputter is mounted to synthesize final outputs
       "force_synthesis": false // Force Outputter synthesis even without explicit output schema
     },
+    // 🧠 Decision Layer (System One): a local decision model (Laya via Ollama
+    // or a Jev-compatible endpoint) answers cheap typed junctions — yes/no
+    // gates, categorical picks, rubric scores — in ~100ms instead of a full
+    // Gemma turn. Advisory only: below-threshold or unreachable answers
+    // escalate to the existing model path. Text/JSON state only — no pixels.
+    "decision": {
+      "enabled": false,           // opt-in; off = upstream-identical behavior
+      "url": "http://127.0.0.1:11434/v1/decide",
+      "model": "laya",
+      "confidence_threshold": 0.85,
+      "timeout_seconds": 5.0,
+      "planner_validation": true  // offload the advisory milestone review first
+    },
     // 🧭 Explorer tier: the perception sub-agent behind `ask_explorer`.
     // Tiers are a user setting; calling agents never see which tier is active.
     //   flash - one-shot visual detection on the screenshot (fastest)
