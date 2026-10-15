@@ -35,9 +35,9 @@ from artemis.llm.reliability import Failure, FailureCategory, LLMCallError
 _FAILURE = Failure(FailureCategory.UNKNOWN, retryable=True, should_fallback=True)
 
 
-def _runner() -> FlashRunner:
+def _runner(goal: str = "enable dark theme") -> FlashRunner:
     r = FlashRunner.__new__(FlashRunner)
-    r.goal = "enable dark theme"
+    r.goal = goal
     return r
 
 
@@ -141,7 +141,7 @@ def test_menu_key_for_call_rejects_non_menu_calls():
 @pytest.mark.asyncio
 async def test_hybrid_decide_returns_call_on_confident_verdict():
     runner = _runner()
-    state = _state([{"index": 1, "text": "Display"}])
+    state = _state([{"index": 1, "text": "Dark theme"}])
     describe_resp = AIMessage(content="Settings list; [1] Display ~[500,300]")
 
     with (
@@ -183,7 +183,7 @@ async def test_hybrid_decide_escalates_on_low_confidence():
             return_value=_verdict("tap_1", confidence=0.10)
         )
         out = await runner._hybrid_decide(
-            AsyncMock(), _state([{"index": 1}]), HumanMessage(content="x"), None, _cfg()
+            AsyncMock(), _state([{"index": 1, "text": "Dark theme"}]), HumanMessage(content="x"), None, _cfg()
         )
     assert out is None
 
@@ -207,7 +207,7 @@ async def test_hybrid_decide_gates_on_answer_confidence_not_trust_score():
     ):
         MockClient.return_value.achoose = AsyncMock(return_value=verdict)
         out = await runner._hybrid_decide(
-            AsyncMock(), _state([{"index": 1}]), HumanMessage(content="x"), None, _cfg()
+            AsyncMock(), _state([{"index": 1, "text": "Dark theme"}]), HumanMessage(content="x"), None, _cfg()
         )
     assert out is not None
     assert out[1][0]["name"] == "click"
@@ -255,7 +255,7 @@ async def test_hybrid_decide_escalates_on_out_of_menu_verdict():
 async def test_hybrid_decide_masks_tried_menu_keys():
     """Elements already tapped are removed from the menu by (index, label)
     identity, so the decision model cannot re-pick a dead element."""
-    runner = _runner()
+    runner = _runner(goal="tap Alpha Beta")
     state = _state([{"index": 1, "text": "Alpha"}, {"index": 2, "text": "Beta"}])
     with (
         patch(
@@ -291,7 +291,7 @@ async def test_hybrid_decide_masks_tried_menu_keys():
 async def test_hybrid_decide_masks_reindexed_label():
     """A distinctive label stays masked even when the element list re-indexes
     (the volatile-text problem that defeats screen signatures)."""
-    runner = _runner()
+    runner = _runner(goal="open Settings Beta")
     # Same "Settings" row, now at index 9 instead of 12.
     state = _state([{"index": 9, "text": "Settings"}, {"index": 2, "text": "Beta"}])
     with (
@@ -319,26 +319,63 @@ async def test_hybrid_decide_masks_reindexed_label():
 
 
 @pytest.mark.asyncio
-async def test_hybrid_decide_escalates_when_target_not_visible():
-    """A not-visible marker escalates: between-screen navigation is the VLM
-    path's job — the decision model only picks among on-screen elements."""
-    runner = _runner()
-    describe = AIMessage(content="Home screen. Settings would be in the app drawer.\nTARGET: not-visible")
+async def test_hybrid_decide_escalates_when_menu_lacks_goal_target():
+    """No element label sharing a goal token → between-screen navigation is
+    the VLM path's job; the decision model only picks on-screen elements."""
+    runner = _runner()  # goal: "enable dark theme"
     choose = AsyncMock()
     with (
         patch(
             "artemis.agents.flash.runner.acomplete",
-            new=AsyncMock(return_value=describe),
+            new=AsyncMock(return_value=AIMessage(content="Gmail setup page")),
         ),
         patch("artemis.agents.flash.runner.DecisionClient") as MockClient,
     ):
         MockClient.return_value.achoose = choose
         out = await runner._hybrid_decide(
-            AsyncMock(), _state([{"index": 1}]), HumanMessage(content="x"),
-            None, _cfg(),
+            AsyncMock(),
+            _state([{"index": 1, "text": "GOT IT"}, {"index": 2, "text": "Gmail"}]),
+            HumanMessage(content="x"),
+            None,
+            _cfg(),
         )
     assert out is None
     choose.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_hybrid_decide_proceeds_when_goal_target_present():
+    runner = _runner()
+    with (
+        patch(
+            "artemis.agents.flash.runner.acomplete",
+            new=AsyncMock(return_value=AIMessage(content="Display screen")),
+        ),
+        patch("artemis.agents.flash.runner.DecisionClient") as MockClient,
+    ):
+        choose = AsyncMock(return_value=_verdict("tap_2"))
+        MockClient.return_value.achoose = choose
+        out = await runner._hybrid_decide(
+            AsyncMock(),
+            _state(
+                [{"index": 1, "text": "Brightness"}, {"index": 2, "text": "Dark theme"}]
+            ),
+            HumanMessage(content="x"),
+            None,
+            _cfg(),
+        )
+    assert out is not None
+    choose.assert_awaited()
+
+
+def test_menu_has_goal_target_matching():
+    f = FlashRunner._menu_has_goal_target
+    menu = {"tap_1": "tap element 1: Gmail", "tap_2": "tap element 2: Dark theme"}
+    assert f(menu, "enable dark theme") is True
+    assert f(menu, "open the Settings app") is False
+    assert f({"swipe_up": "scroll"}, "enable dark theme") is False
+    # goals with no matchable tokens never gate (all short/stopword tokens)
+    assert f(menu, "do it") is True
 
 
 @pytest.mark.asyncio
@@ -359,7 +396,7 @@ async def test_hybrid_decide_never_executes_terminal_picks():
                 return_value=_verdict(pick, confidence=0.95)
             )
             out = await runner._hybrid_decide(
-                AsyncMock(), _state([{"index": 1}]), HumanMessage(content="x"),
+                AsyncMock(), _state([{"index": 1, "text": "Dark theme"}]), HumanMessage(content="x"),
                 None, _cfg(),
             )
         assert out is None, pick

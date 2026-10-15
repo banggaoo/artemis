@@ -529,6 +529,32 @@ class FlashRunner:
             }
         return None
 
+    _GOAL_STOPWORDS = frozenset(
+        {
+            "the", "and", "for", "with", "app", "open", "into", "enable",
+            "disable", "turn", "tap", "click", "press", "then", "this",
+            "that", "screen", "page", "goto", "select",
+        }
+    )
+
+    @classmethod
+    def _menu_has_goal_target(cls, menu: dict[str, str], goal: str) -> bool:
+        """True when some tap label shares a meaningful token with the goal."""
+        goal_tokens = {
+            t
+            for t in re.findall(r"[a-z0-9']+", goal.lower())
+            if len(t) >= 4 and t not in cls._GOAL_STOPWORDS
+        }
+        if not goal_tokens:
+            return True
+        for key, label in menu.items():
+            if not key.startswith("tap_"):
+                continue
+            label_tokens = set(re.findall(r"[a-z0-9']+", label.lower()))
+            if label_tokens & goal_tokens:
+                return True
+        return False
+
     @staticmethod
     def _menu_key_for_call(name: str, args: dict) -> str | None:
         """Maps an executed tool call back to its hybrid menu key, so actions
@@ -589,25 +615,21 @@ class FlashRunner:
         description = self._extract_response_text(response)
         logger.info(f"Hybrid describe: {description[:200]}")
 
-        # Visibility gate: when the describe pass reports the goal's next
-        # target is not on this screen (or already reached), the right move
-        # is between-screen navigation or goal verification — both VLM
-        # strengths. The decision model only chooses among on-screen
-        # elements; observed live: absent-target screens make it pick
-        # press_home/wait/done on repeat.
-        marker = re.search(
-            r"TARGET:\s*(visible|not-visible|reached)", description
-        )
-        if marker and marker.group(1) != "visible":
-            logger.info(
-                f"Hybrid describe reports {marker.group(1)} — escalating "
-                "the navigation turn to the VLM path"
-            )
-            return None
-
         menu = self._hybrid_action_menu(
             state, tried_taps=tried_taps, tried_labels=tried_labels
         )
+        # Visibility gate: the goal's next target must exist among the menu's
+        # element labels for an in-screen pick to be meaningful at all. Token
+        # overlap between labels and the goal is the check — describe
+        # narration can't be trusted (observed: 'TARGET: visible' on a home
+        # screen listing no Settings). No match → the VLM handles the
+        # between-screen navigation turn instead.
+        if not self._menu_has_goal_target(menu, self.goal):
+            logger.info(
+                "Hybrid menu holds no goal-relevant element — escalating "
+                "the navigation turn to the VLM path"
+            )
+            return None
         tried_line = ""
         if tried_taps or tried_labels:
             masked = sorted(
