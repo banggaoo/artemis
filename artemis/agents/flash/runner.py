@@ -190,10 +190,14 @@ Describe the CURRENT screenshot factually in 3-5 short sentences: which app
 and screen is shown, what has changed since the previous observation, and
 where the elements relevant to the goal sit. If the goal's next target is
 NOT visible, say so and note how it would be reached (e.g. open the app
-drawer, scroll, navigate back). Then list EVERY interactive element from
-the attached list, one per line: [index] label ~[x,y] — the approximate
-normalized 0-1000 coordinate is only required for elements visible on
-screen but NOT in the list. End with exactly one marker line:
+drawer, scroll, navigate back). When a goal-relevant toggle, switch, or
+control is visible, state its CURRENT value explicitly (on/off, checked,
+enabled, the shown selection) — and if the goal state is already satisfied,
+say so plainly rather than describing the screen generically. Then list
+EVERY interactive element from the attached list, one per line: [index]
+label ~[x,y] — the approximate normalized 0-1000 coordinate is only
+required for elements visible on screen but NOT in the list. End with
+exactly one marker line:
 TARGET: visible — the goal's next interactive target is on this screen
 TARGET: not-visible — it is not; navigation is needed first
 TARGET: reached — the goal state is already achieved
@@ -309,6 +313,10 @@ class FlashRunner:
         # has already rejected this run.
         self._plan_text: str | None = None
         self._completion_rejections = 0
+        # One-line "last action → outcome" fed into the decision model's
+        # state: Laya has no transcript view, so without it a dead tap and
+        # real progress look identical.
+        self._last_action_note: str | None = None
 
     @property
     def turn_limit(self) -> int | None:
@@ -681,10 +689,15 @@ class FlashRunner:
         client = DecisionClient(
             cfg.url, model=cfg.model, timeout_seconds=cfg.timeout_seconds
         )
+        last_line = (
+            f"\nLast action outcome: {self._last_action_note}"
+            if self._last_action_note
+            else ""
+        )
         state_text = (
             f"Goal: {self.goal}\n"
             f"Plan: {plan_text or 'none'}\n"
-            f"Current screen: {description}{tried_line}"
+            f"Current screen: {description}{tried_line}{last_line}"
         )
         verdict = await client.achoose(
             state_text[-_HYBRID_MAX_STATE_CHARS:],
@@ -1995,6 +2008,16 @@ class FlashRunner:
                 )
             else:
                 hybrid_repeat_streak = 0
+
+            # Feed the decision model a one-line outcome: it cannot see the
+            # transcript, so a no-op tap and real progress otherwise look the
+            # same on the next pick (observed: three re-picks of a dead row).
+            if tool_calls:
+                names = ", ".join(str(tc.get("name") or "?") for tc in tool_calls)
+                outcome = "no visible change" if unchanged else "screen changed"
+                self._last_action_note = f"{names} → {outcome}"
+            else:
+                self._last_action_note = None
 
             ledger.stage_turn(messages[turn_base:])
             previous_turn = turn

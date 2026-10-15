@@ -38,6 +38,7 @@ _FAILURE = Failure(FailureCategory.UNKNOWN, retryable=True, should_fallback=True
 def _runner(goal: str = "enable dark theme") -> FlashRunner:
     r = FlashRunner.__new__(FlashRunner)
     r.goal = goal
+    r._last_action_note = None
     return r
 
 
@@ -437,3 +438,51 @@ async def test_hybrid_plan_failure_is_non_fatal():
         new=AsyncMock(side_effect=LLMCallError("boom", failure=_FAILURE)),
     ):
         assert await runner._hybrid_plan(AsyncMock()) is None
+
+
+@pytest.mark.asyncio
+async def test_hybrid_decide_state_includes_last_action_outcome():
+    """The decision model has no transcript view — the one-line last-action
+    note is its only signal that a tap was a dead end vs. real progress."""
+    runner = _runner()
+    runner._last_action_note = "click → no visible change"
+    state = _state([{"index": 1, "text": "Dark theme"}])
+    captured = {}
+
+    with (
+        patch(
+            "artemis.agents.flash.runner.acomplete",
+            new=AsyncMock(return_value=AIMessage(content="desc")),
+        ),
+        patch("artemis.agents.flash.runner.DecisionClient") as MockClient,
+    ):
+        async def _achoose(state_text, question, menu):
+            captured["state"] = state_text
+            return _verdict("tap_1")
+
+        MockClient.return_value.achoose = _achoose
+        await runner._hybrid_decide(
+            AsyncMock(), state, HumanMessage(content="x"), "plan", _cfg()
+        )
+
+    assert "click → no visible change" in captured["state"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_decide_escalates_when_describe_says_target_reached():
+    """'TARGET: reached' is a perception claim, not a menu pick — the turn
+    escalates so the VLM can verify and report (the terminal gate audits it)."""
+    runner = _runner()
+    state = _state([{"index": 1, "text": "Dark theme"}])
+    describe = AIMessage(content="Dark theme is already on.\nTARGET: reached")
+
+    with patch(
+        "artemis.agents.flash.runner.acomplete",
+        new=AsyncMock(return_value=describe),
+    ), patch("artemis.agents.flash.runner.DecisionClient") as MockClient:
+        out = await runner._hybrid_decide(
+            AsyncMock(), state, HumanMessage(content="x"), "plan", _cfg()
+        )
+
+    assert out is None
+    MockClient.return_value.achoose.assert_not_called()
