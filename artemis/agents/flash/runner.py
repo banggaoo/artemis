@@ -304,6 +304,11 @@ class FlashRunner:
                 ctx.step_memory = self.summarizer
             except (AttributeError, TypeError, ValueError):
                 pass
+        # Terminal-boundary verification state: the hybrid plan text (for the
+        # final check's context) and how many 'completed' reports the checker
+        # has already rejected this run.
+        self._plan_text: str | None = None
+        self._completion_rejections = 0
 
     @property
     def turn_limit(self) -> int | None:
@@ -1030,21 +1035,15 @@ class FlashRunner:
     ) -> dict:
         """Records the final step, acknowledges the tool call, and flushes."""
         final_report = args
-        if self.ctx.data_engine:
-            try:
-                if self.ctx.data_engine.current_step_id is None:
-                    self.ctx.data_engine.allocate_step_id()
-                self.ctx.data_engine.record_step(
-                    pre_screenshot_bytes=pre_screenshot_bytes,
-                    ui_tree=xml_list,
-                    action_taken={"action": "report_task_status", "args": args},
-                    operator_raw_thinking=raw_text,
-                    operator_native_thinking=native_text or None,
-                    last_execution_result={"result": "Task completed with final report."},
-                    extra_metadata={"token_usage": step_token_usage},
-                )
-            except Exception as step_err:
-                logger.warning(f"Error recording final step in FlashRunner: {step_err}")
+        self._record_terminal_step(
+            args,
+            raw_text,
+            step_token_usage,
+            pre_screenshot_bytes,
+            xml_list,
+            last_execution_result={"result": "Task completed with final report."},
+            native_text=native_text,
+        )
         messages.append(
             ToolMessage(
                 tool_call_id=tc_id,
@@ -1056,6 +1055,83 @@ class FlashRunner:
         if self.summarizer:
             await self.summarizer.flush()
         return final_report
+
+    def _record_terminal_step(
+        self,
+        args: dict,
+        raw_text: str,
+        step_token_usage: dict,
+        pre_screenshot_bytes,
+        xml_list,
+        last_execution_result: dict,
+        native_text: str | None = None,
+    ) -> None:
+        """Writes a report_task_status step to the data engine (accepted or
+        rejected), mirroring the final-step record shape."""
+        if not self.ctx.data_engine:
+            return
+        try:
+            if self.ctx.data_engine.current_step_id is None:
+                self.ctx.data_engine.allocate_step_id()
+            self.ctx.data_engine.record_step(
+                pre_screenshot_bytes=pre_screenshot_bytes,
+                ui_tree=xml_list,
+                action_taken={"action": "report_task_status", "args": args},
+                operator_raw_thinking=raw_text,
+                operator_native_thinking=native_text or None,
+                last_execution_result=last_execution_result,
+                extra_metadata={"token_usage": step_token_usage},
+            )
+        except Exception as step_err:
+            logger.warning(f"Error recording terminal step in FlashRunner: {step_err}")
+
+    async def _verify_completion(self) -> tuple[bool, str]:
+        """Terminal-boundary check on a 'completed' report_task_status claim.
+
+        Runs the Pro final review — final screenshot, element list, and the
+        enumerated read-only device probes — so the release decision rests on
+        device state rather than the agent's narration (observed live: a
+        double tap netted zero on the dark-theme switch, then the model
+        reported completed). Fail-open on checker errors: a broken verifier
+        must never trap the loop.
+
+        Returns ``(allowed, findings)``; ``findings`` lists failed verify
+        verdicts and unmet subgoals for feedback on rejection.
+        """
+        setup = getattr(self.ctx, "execution_setup", None)
+        if not (setup and getattr(setup, "final_check_enabled", False)):
+            return True, ""
+        try:
+            from artemis.agents.checker.checker import (
+                run_final_check,
+                verdicts_allow_release,
+            )
+
+            timeout = float(getattr(setup, "checkpoint_timeout", 180.0) or 180.0)
+            report = await asyncio.wait_for(
+                run_final_check(
+                    self.ctx,
+                    goal=self.goal,
+                    plan_text=self._plan_text or "",
+                    ledger=[],
+                    check_items=[],
+                ),
+                timeout=timeout,
+            )
+        except Exception as e:
+            logger.warning(f"Final check errored ({e}); releasing fail-open.")
+            return True, ""
+        if verdicts_allow_release(report) and not report.unmet_subgoals:
+            logger.info("Final check released the completion report.")
+            return True, ""
+        findings = [
+            f"[verify failed] '{v.item_text}': {v.evidence}"
+            + (f" Suggestion: {v.suggestion}" if v.suggestion else "")
+            for v in report.verdicts
+            if v.kind == "verify" and v.status == "failed"
+        ]
+        findings += [f"[unmet subgoal] '{t}'" for t in report.unmet_subgoals]
+        return False, "\n".join(findings) or "Final check did not confirm completion."
 
     async def _capture_post_screenshot(
         self, exec_result, name: str, action_names, state: State | None = None
@@ -1455,6 +1531,76 @@ class FlashRunner:
             logger.info(f"Executing Flash tool: {name}({args})")
 
             if name == "report_task_status":
+                # Terminal-boundary verification: a 'completed' claim is only
+                # released when the final check confirms the goal from device
+                # state. A rejected claim feeds the verdicts back and the run
+                # continues; once the retry budget (final_check_max_attempts)
+                # is spent, the report is finalized as failed — a blocked
+                # outcome, mirroring the Pro graph.
+                if args.get("status") == "completed":
+                    allowed, findings = await self._verify_completion()
+                    if not allowed:
+                        self._completion_rejections += 1
+                        setup = getattr(self.ctx, "execution_setup", None)
+                        max_attempts = int(
+                            getattr(setup, "final_check_max_attempts", 3) or 3
+                        )
+                        if self._completion_rejections < max_attempts:
+                            logger.info(
+                                "Completion report rejected by final check"
+                                f" ({self._completion_rejections}/{max_attempts}):"
+                                f" {findings}"
+                            )
+                            self._record_terminal_step(
+                                args,
+                                raw_text,
+                                step_token_usage,
+                                pre_screenshot_bytes,
+                                xml_list,
+                                last_execution_result={
+                                    "result": (
+                                        "Completion rejected by final check:"
+                                        f" {findings}"
+                                    )
+                                },
+                                native_text=native_text,
+                            )
+                            messages.append(
+                                ToolMessage(
+                                    tool_call_id=tc_id,
+                                    name=name,
+                                    content=json.dumps(
+                                        {
+                                            "status": "rejected",
+                                            "reason": (
+                                                "Completion verification"
+                                                " failed."
+                                            ),
+                                            "findings": findings,
+                                            "instruction": (
+                                                "The final check could not"
+                                                " confirm the goal from device"
+                                                " state. Continue the task, or"
+                                                " report status 'failed'"
+                                                " honestly."
+                                            ),
+                                        }
+                                    ),
+                                    status="error",
+                                )
+                            )
+                            continue
+                        logger.warning(
+                            "Final-check retry budget exhausted; finalizing"
+                            f" as failed. Last findings: {findings}"
+                        )
+                        args = dict(args)
+                        args["status"] = "failed"
+                        args["explanation"] = (
+                            f"{args.get('explanation', '')}\n\n"
+                            "Completion verification repeatedly failed;"
+                            f" blocked outcome. {findings}"
+                        ).strip()
                 final_report = await self._finalize_task_report(
                     name,
                     args,
@@ -1578,6 +1724,7 @@ class FlashRunner:
         if hybrid:
             logger.info("Hybrid Flash loop enabled: VLM describes, decision model acts.")
             plan_text = await self._hybrid_plan(llm, img_bytes, xml_list)
+            self._plan_text = plan_text
 
         turns = 0
         action_sequence = 0

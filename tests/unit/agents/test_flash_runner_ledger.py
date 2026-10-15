@@ -684,3 +684,79 @@ def test_turn_record_reports_the_first_failure_of_a_multi_action_turn():
         ]
     )
     assert record.result()["error"] == "click rejected: coordinates out of bounds"
+
+
+# ---------------------------------------------------------------------------
+# Terminal-boundary completion verification (Pro final check at report time)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rejected_completion_feeds_verdicts_back_and_the_run_continues(mock_context):
+    """A 'completed' report the final check rejects must not end the run:
+    the tool call is answered with a rejection carrying the failed verdicts,
+    and the next turn still runs — here the agent then fails honestly."""
+    responses = [_report(explanation="dark theme on"), _report(status="failed", explanation="cannot")]
+    with (
+        patch("artemis.controllers.unified_controller.get_driver"),
+        patch(
+            "artemis.agents.flash.runner.capture_screenshot_and_parse_ui",
+            AsyncMock(return_value=_INITIAL_OBSERVATION),
+        ),
+    ):
+        runner = _make_runner(mock_context, responses, max_turns=0)
+        runner._verify_completion = AsyncMock(
+            return_value=(False, "[verify failed] 'dark theme enabled': ui_night_mode=1")
+        )
+        result = await runner.run(State(initial_goal="Enable dark theme"))
+
+    assert result == {"status": "failed", "explanation": "cannot"}
+    assert runner._completion_rejections == 1
+    # The rejected tool call got an answering ToolMessage with the verdicts.
+    turn2_messages = runner.calls[1]["messages"]
+    rejection = next(
+        m for m in turn2_messages if isinstance(m, ToolMessage) and "rejected" in str(m.content)
+    )
+    assert "ui_night_mode=1" in rejection.content
+    assert rejection.status == "error"
+
+
+@pytest.mark.asyncio
+async def test_completion_blocked_outcome_when_verify_budget_is_exhausted(mock_context):
+    """Once the retry budget is spent the report is finalized as failed —
+    narration cannot outvote the checker's ground truth forever."""
+    responses = [_report(explanation="dark theme on")]
+    with (
+        patch("artemis.controllers.unified_controller.get_driver"),
+        patch(
+            "artemis.agents.flash.runner.capture_screenshot_and_parse_ui",
+            AsyncMock(return_value=_INITIAL_OBSERVATION),
+        ),
+    ):
+        runner = _make_runner(mock_context, responses, max_turns=0)
+        runner._completion_rejections = 3  # == default final_check_max_attempts
+        runner._verify_completion = AsyncMock(return_value=(False, "goal unmet"))
+        result = await runner.run(State(initial_goal="Enable dark theme"))
+
+    assert result["status"] == "failed"
+    assert "blocked" in result["explanation"].lower()
+    assert "goal unmet" in result["explanation"]
+
+
+@pytest.mark.asyncio
+async def test_failed_status_skips_completion_verification(mock_context):
+    """Only 'completed' claims are audited; reporting failure is honest already."""
+    responses = [_report(status="failed", explanation="device offline")]
+    with (
+        patch("artemis.controllers.unified_controller.get_driver"),
+        patch(
+            "artemis.agents.flash.runner.capture_screenshot_and_parse_ui",
+            AsyncMock(return_value=_INITIAL_OBSERVATION),
+        ),
+    ):
+        runner = _make_runner(mock_context, responses, max_turns=0)
+        runner._verify_completion = AsyncMock(return_value=(True, ""))
+        result = await runner.run(State(initial_goal="Enable dark theme"))
+
+    assert result["status"] == "failed"
+    runner._verify_completion.assert_not_awaited()
