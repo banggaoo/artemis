@@ -1691,7 +1691,7 @@ class FlashRunner:
                     retry_text = self._extract_response_text(retry_response)
                     retry_calls = self._resolve_tool_calls(retry_response, retry_text)
                     if retry_calls:
-                        response, raw_text, tool_calls = retry, retry_text, retry_calls
+                        response, raw_text, tool_calls = retry_response, retry_text, retry_calls
                         messages.append(response)
 
             if not tool_calls:
