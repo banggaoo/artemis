@@ -461,6 +461,26 @@ class FlashRunner:
         )[:60]
 
     @staticmethod
+    def _element_signature(elements) -> frozenset:
+        """(label, center) set used to tell whether the screen actually changed."""
+        return frozenset(
+            (
+                FlashRunner._element_label(el),
+                tuple(el.get("center") or ()),
+            )
+            for el in elements
+        )
+
+    @staticmethod
+    def _signatures_similar(a: frozenset, b: frozenset, threshold: float = 0.8) -> bool:
+        """Jaccard-similar element signatures — tolerates volatile items like
+        the clock, so a screen is 'unchanged' only when it really didn't move."""
+        union = a | b
+        if not union:
+            return True
+        return len(a & b) / len(union) >= threshold
+
+    @staticmethod
     def _hybrid_action_menu(
         state: State,
         tried_taps: set[tuple[int, str]] | None = None,
@@ -1581,6 +1601,7 @@ class FlashRunner:
         tried_taps: set[tuple[int, str]] = set()
         tried_labels: set[str] = set()
         hybrid_last_key: str | None = None
+        hybrid_last_call_sig = ""
         hybrid_repeat_streak = 0
 
         while limit is None or turns < limit:
@@ -1726,45 +1747,35 @@ class FlashRunner:
 
             no_tool_call_streak = 0
 
-            # Record executed actions for the repeat machinery: element taps
-            # join the masked sets by identity; the same menu key executed
-            # twice in a row counts as a consecutive repeat (the decision
-            # model picks it again because nothing told it the last one did
-            # nothing).
+            # Snapshot the pre-action screen for the repeat machinery. A tap
+            # only joins the masked sets when it did NOT change the screen —
+            # a tap that navigated somewhere is working navigation, and masking
+            # its label would eventually erase every goal-relevant element from
+            # the menu (observed: the dark-theme run masked 'Use Dark theme'
+            # itself, leaving the VLM to toggle the switch blind forever).
             elements_now = getattr(state, "indexed_elements", None) or []
+            pre_sig = self._element_signature(elements_now)
             label_by_idx = {
                 el.get("index"): self._element_label(el)
                 for el in elements_now
                 if el.get("index") is not None
             }
-            repeat_keys: list[str] = []
+            turn_keys: list[str] = []
+            tap_records: list[tuple[int, str]] = []
+            call_sig = "|".join(
+                sorted(
+                    f"{tc.get('name')}:{json.dumps(tc.get('args') or {}, sort_keys=True, default=str)}"
+                    for tc in tool_calls
+                )
+            )
             for tc in tool_calls:
                 key = self._menu_key_for_call(tc.get("name"), tc.get("args"))
                 if key is None:
                     continue
+                turn_keys.append(key)
                 if key.startswith("tap_"):
                     idx = int(key[len("tap_"):])
-                    label = label_by_idx.get(idx, "")
-                    ident = (idx, label)
-                    if ident in tried_taps or (
-                        len(label) >= 4 and label in tried_labels
-                    ):
-                        repeat_keys.append(key)
-                    tried_taps.add(ident)
-                    if len(label) >= 4:
-                        tried_labels.add(label)
-                elif key == hybrid_last_key:
-                    repeat_keys.append(key)
-                hybrid_last_key = key
-            if repeat_keys:
-                hybrid_repeat_streak += 1
-                pending_notices.append(
-                    f"[NOTICE] {', '.join(sorted(set(repeat_keys)))} was already"
-                    " attempted and did not move the task forward. Pick a"
-                    " different action or navigate elsewhere first."
-                )
-            else:
-                hybrid_repeat_streak = 0
+                    tap_records.append((idx, label_by_idx.get(idx, "")))
 
             # Process tool calls
             turn = _TurnRecord()
@@ -1786,6 +1797,47 @@ class FlashRunner:
                 injected=injected,
                 native_text=native_text,
             )
+
+            # Did anything actually change? Mask dead taps, count repeats of
+            # already-dead keys, and flag a verbatim re-issue of last turn's
+            # call set (the VLM re-clicking the same coordinates counts too).
+            post_sig = self._element_signature(
+                getattr(state, "indexed_elements", None) or []
+            )
+            unchanged = self._signatures_similar(pre_sig, post_sig)
+            repeat_keys: list[str] = []
+            for key in turn_keys:
+                if key.startswith("tap_"):
+                    idx = int(key[len("tap_"):])
+                    label = label_by_idx.get(idx, "")
+                    ident = (idx, label)
+                    if ident in tried_taps or (
+                        len(label) >= 4 and label in tried_labels
+                    ):
+                        repeat_keys.append(key)
+                elif key == hybrid_last_key:
+                    repeat_keys.append(key)
+                hybrid_last_key = key
+            if unchanged:
+                for idx, label in tap_records:
+                    tried_taps.add((idx, label))
+                    if len(label) >= 4:
+                        tried_labels.add(label)
+            verbatim_repeat = (
+                unchanged and call_sig and call_sig == hybrid_last_call_sig
+            )
+            hybrid_last_call_sig = call_sig
+            if repeat_keys or verbatim_repeat:
+                hybrid_repeat_streak += 1
+                noted = repeat_keys or ["the same action"]
+                pending_notices.append(
+                    f"[NOTICE] {', '.join(sorted(set(noted)))} was already"
+                    " attempted and did not move the task forward. Pick a"
+                    " different action or report the task status."
+                )
+            else:
+                hybrid_repeat_streak = 0
+
             ledger.stage_turn(messages[turn_base:])
             previous_turn = turn
             if final_report_from_calls is not None:
