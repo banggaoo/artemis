@@ -172,10 +172,14 @@ _HYBRID_PLAN_PROMPT = """You are the planning stage of a UI testing agent.
 GOAL: $goal
 
 Given the attached CURRENT screenshot and element list, decompose the goal
-into 3-8 short ordered milestones (one per line, starting with '- '). Each
-milestone names a screen state or interaction step visible or reachable
-from here — including how to reach off-screen targets (e.g. the app drawer
-opens with a swipe up). Output only the milestone list."""
+into 3-6 short ordered milestones (one per line, starting with '- '). Each
+milestone is a SCREEN STATE to reach or a concrete interaction ON THE GOAL
+PATH — e.g. "open the app drawer (swipe up on home)", "Settings main list
+open", "Dark theme toggle enabled". Only include steps that move toward the
+goal; NEVER enumerate visible elements unrelated to it (do not list "tap
+<app icon>" for every icon — a milestone is progress, not an inventory).
+If the first target is not visible, the first milestone is how to reach it.
+Output only the milestone list."""
 
 _HYBRID_DESCRIBE_PROMPT = """You are the perception stage of a UI testing agent.
 GOAL: $goal
