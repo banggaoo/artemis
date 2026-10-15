@@ -562,6 +562,23 @@ class FlashRunner:
             }
         return None
 
+    _NAV_LABEL_RE = re.compile(
+        r"navigate up|back|close|cancel|done|collapse|dismiss|arrow", re.I
+    )
+
+    def _navigation_suggestions(self, elements) -> str:
+        """Labeled elements that look like exits/nav — offered as concrete
+        alternatives when the model is re-issuing a dead action."""
+        hints = []
+        for el in elements or []:
+            idx = el.get("index")
+            label = self._element_label(el)
+            if idx is None or not label:
+                continue
+            if self._NAV_LABEL_RE.search(label):
+                hints.append(f"[{idx}] {label}")
+        return ", ".join(hints[:6])
+
     _GOAL_STOPWORDS = frozenset(
         {
             "the", "and", "for", "with", "app", "open", "into", "enable",
@@ -2001,11 +2018,22 @@ class FlashRunner:
             if repeat_keys or verbatim_repeat:
                 hybrid_repeat_streak += 1
                 noted = repeat_keys or ["the same action"]
-                pending_notices.append(
+                nav = self._navigation_suggestions(elements_now)
+                notice = (
                     f"[NOTICE] {', '.join(sorted(set(noted)))} was already"
-                    " attempted and did not move the task forward. Pick a"
-                    " different action or report the task status."
+                    " attempted and did not move the task forward."
                 )
+                if nav:
+                    notice += f" Available navigation elements instead: {nav}."
+                if hybrid_repeat_streak >= 3:
+                    notice += (
+                        " This action has now failed several times in a row —"
+                        " do not repeat it; use a different element, a system"
+                        " key (back/home), or report_task_status('failed')."
+                    )
+                else:
+                    notice += " Pick a different action or report the task status."
+                pending_notices.append(notice)
             else:
                 hybrid_repeat_streak = 0
 
