@@ -664,14 +664,20 @@ class FlashRunner:
         except (TypeError, ValueError):
             pass
         floor = getattr(cfg, "flash_choice_threshold", 0.25)
+        # Scale the floor to the menu size: on a 20-option menu a uniform
+        # spread is 0.05, so a 0.20 top pick is 4x uniform — decisive — yet a
+        # fixed 0.25 gate escalates every real-screen verdict (observed: all
+        # post-navigation picks landed 0.16–0.23). Require 4x uniform, capped
+        # at the configured floor, with an absolute minimum of 0.12.
+        effective_floor = max(0.12, min(floor, 4.0 / max(len(menu), 1)))
         if (
             not verdict.answered
-            or top_p < floor
+            or top_p < effective_floor
             or verdict.verdict not in menu
         ):
             logger.info(
                 f"Hybrid decision inconclusive (verdict={verdict.verdict!r} "
-                f"top_p={top_p:.2f} floor={floor:.2f}), escalating to tool-call turn"
+                f"top_p={top_p:.2f} floor={effective_floor:.2f}), escalating to tool-call turn"
             )
             return None
         if verdict.verdict in ("done", "fail"):
@@ -1674,6 +1680,21 @@ class FlashRunner:
                 if is_final:
                     final_report = {"status": "failed", "explanation": raw_text}
                     break
+                # Local VLM servers (mlx_vlm) accept tool_choice="required" yet
+                # still let the model narrate. Re-ask once, in-turn, with an
+                # explicit directive before counting a no-progress turn — the
+                # model does emit calls when pushed (observed: it narrates
+                # "the toggle is on" instead of calling report_task_status).
+                messages.append(HumanMessage(content=_NO_TOOL_CALL_NOTICE))
+                retry_response = await self._invoke_model(llm, current_tools, messages)
+                if retry_response is not None:
+                    retry_text = self._extract_response_text(retry_response)
+                    retry_calls = self._resolve_tool_calls(retry_response, retry_text)
+                    if retry_calls:
+                        response, raw_text, tool_calls = retry, retry_text, retry_calls
+                        messages.append(response)
+
+            if not tool_calls:
                 no_tool_call_streak += 1
                 if no_tool_call_streak >= _MAX_CONSECUTIVE_NO_TOOL_CALLS:
                     final_report = {
