@@ -1789,6 +1789,9 @@ class FlashRunner:
         hybrid_last_key: str | None = None
         hybrid_last_call_sig = ""
         hybrid_repeat_streak = 0
+        # Whether the previous turn's actions left the screen unchanged —
+        # the pre-execution half of verbatim dead-call suppression.
+        prev_turn_unchanged = False
 
         while limit is None or turns < limit:
             turns += 1
@@ -1965,6 +1968,52 @@ class FlashRunner:
                     idx = int(key[len("tap_"):])
                     tap_records.append((idx, label_by_idx.get(idx, "")))
 
+            # Dead-verbatim suppression: when this turn's call set is identical
+            # to the previous turn's and that turn changed nothing, executing
+            # the same actions again can only produce the same dead result —
+            # the VLM is looping on an element it keeps mis-picking (observed:
+            # five identical click(10)s on a blank row). Answer the tool calls
+            # with an error instead so the next turn must choose differently;
+            # the notice names navigation alternatives.
+            if call_sig and call_sig == hybrid_last_call_sig and prev_turn_unchanged:
+                nav = self._navigation_suggestions(elements_now)
+                notice = (
+                    "[NOTICE] The exact same action was already executed and"
+                    " changed nothing. It was not re-run. Pick a different"
+                    " action."
+                    + (f" Available navigation elements: {nav}." if nav else "")
+                )
+                logger.info(f"Suppressing verbatim repeat of dead call set: {call_sig}")
+                for tc in tool_calls:
+                    messages.append(
+                        ToolMessage(
+                            tool_call_id=tc.get("id") or str(uuid.uuid4()),
+                            name=str(tc.get("name") or ""),
+                            content=json.dumps(
+                                {
+                                    "status": "error",
+                                    "error": (
+                                        "This exact action was already executed"
+                                        " and changed nothing; it was not"
+                                        " re-run. Choose a different action."
+                                    ),
+                                }
+                            ),
+                            status="error",
+                        )
+                    )
+                pending_notices.append(notice)
+                hybrid_repeat_streak += 1
+                (
+                    current_pre_screenshot_bytes,
+                    current_xml_list,
+                ) = await self._refresh_idle_observation(
+                    state, current_pre_screenshot_bytes, current_xml_list
+                )
+                ledger.stage_turn(messages[turn_base:])
+                previous_turn = _TurnRecord()
+                continue
+
             # Process tool calls
             turn = _TurnRecord()
             (
@@ -2015,6 +2064,7 @@ class FlashRunner:
                 unchanged and call_sig and call_sig == hybrid_last_call_sig
             )
             hybrid_last_call_sig = call_sig
+            prev_turn_unchanged = unchanged
             if repeat_keys or verbatim_repeat:
                 hybrid_repeat_streak += 1
                 noted = repeat_keys or ["the same action"]

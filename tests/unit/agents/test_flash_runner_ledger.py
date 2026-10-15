@@ -760,3 +760,43 @@ async def test_failed_status_skips_completion_verification(mock_context):
 
     assert result["status"] == "failed"
     runner._verify_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_verbatim_dead_call_set_is_suppressed_not_reexecuted(mock_context):
+    """An identical call set that already changed nothing must not be
+    executed a second time — the tool call is answered with an error and a
+    navigation hint instead of burning a real tap."""
+    dead_call = {
+        "name": "click",
+        "args": {"target": [897, 390], "target_description": "Dark theme"},
+        "id": "tc-a",
+    }
+    repeat_call = dict(dead_call, id="tc-b")
+    responses = [
+        AIMessage(content="tap", tool_calls=[dead_call]),
+        AIMessage(content="tap again", tool_calls=[repeat_call]),
+        _report(status="failed", explanation="gave up"),
+    ]
+    with (
+        patch("artemis.controllers.unified_controller.get_driver"),
+        patch(
+            "artemis.agents.flash.runner.capture_screenshot_and_parse_ui",
+            AsyncMock(return_value=_INITIAL_OBSERVATION),
+        ),
+    ):
+        runner = _make_runner(mock_context, responses, max_turns=0)
+        result = await runner.run(State(initial_goal="Enable dark theme"))
+
+    assert result["status"] == "failed"
+    # Only ONE real click executed; the verbatim repeat was suppressed.
+    executed = [c for c in runner.executor.execute.await_args_list]
+    assert len(executed) == 1
+    # The suppressed call got an error ToolMessage in the next turn's prompt.
+    turn3_messages = runner.calls[2]["messages"]
+    err = next(
+        m
+        for m in turn3_messages
+        if isinstance(m, ToolMessage) and "was already executed" in str(m.content)
+    )
+    assert err.status == "error"
