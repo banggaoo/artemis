@@ -210,6 +210,12 @@ _HYBRID_META_ACTIONS = {
 # are rarely the right action anyway.
 _HYBRID_MAX_MENU_ELEMENTS = 15
 
+# Consecutive turns that re-executed an already-tried menu key before the
+# hybrid decide is skipped entirely and the turn escalates to the VLM —
+# the masked menu plus the notice usually break the loop first, but the
+# standard path is the fallback when even that fails.
+_HYBRID_REPEAT_ESCALATE = 2
+
 # Distilled state sent to the decision model is capped for the same reason:
 # goal + plan + screen description, truncated tail-first.
 _HYBRID_MAX_STATE_CHARS = 2000
@@ -421,13 +427,33 @@ class FlashRunner:
         return plan or None
 
     @staticmethod
-    def _hybrid_action_menu(state: State) -> dict[str, str]:
+    def _element_label(el: dict) -> str:
+        return str(
+            el.get("text")
+            or el.get("content_desc")
+            or el.get("resource_id")
+            or el.get("class_name")
+            or "element"
+        )[:60]
+
+    @staticmethod
+    def _hybrid_action_menu(
+        state: State,
+        tried_taps: set[tuple[int, str]] | None = None,
+        tried_labels: set[str] | None = None,
+    ) -> dict[str, str]:
         """The fixed action menu for one turn: element taps + meta-actions.
 
         Tap keys embed the element index of the CURRENT observation's list —
         index drift across turns is impossible because the menu is rebuilt
         every turn and the executor resolves the index against the same list
         snapshot the decision was made on.
+
+        ``tried_taps`` masks elements already tapped by (index, label)
+        identity; ``tried_labels`` additionally masks any element whose
+        distinctive label was tapped before, surviving re-indexing. A screen
+        signature can't express "same screen" here — volatile text (clocks,
+        badges) perturbs it — so identity matching is used instead.
         """
         elements = getattr(state, "indexed_elements", None) or []
         menu: dict[str, str] = {}
@@ -435,14 +461,12 @@ class FlashRunner:
             idx = el.get("index")
             if idx is None:
                 continue
-            label = (
-                el.get("text")
-                or el.get("content_desc")
-                or el.get("resource_id")
-                or el.get("class_name")
-                or "element"
-            )
-            menu[f"tap_{idx}"] = f"tap element {idx}: {str(label)[:60]}"
+            label = FlashRunner._element_label(el)
+            if tried_taps and (idx, label) in tried_taps:
+                continue
+            if tried_labels and len(label) >= 4 and label in tried_labels:
+                continue
+            menu[f"tap_{idx}"] = f"tap element {idx}: {label}"
         menu.update(_HYBRID_META_ACTIONS)
         return menu
 
@@ -481,6 +505,27 @@ class FlashRunner:
             }
         return None
 
+    @staticmethod
+    def _menu_key_for_call(name: str, args: dict) -> str | None:
+        """Maps an executed tool call back to its hybrid menu key, so actions
+        taken on a screen can be masked from the menu on a later visit."""
+        args = args or {}
+        if name == "click":
+            target = args.get("target")
+            return f"tap_{target}" if isinstance(target, int) else None
+        if name == "swipe":
+            direction = str(args.get("direction") or args.get("gesture") or "").lower()
+            return f"swipe_{direction}" if direction in ("up", "down", "left", "right") else None
+        if name == "press_key":
+            return {"back": "press_back", "home": "press_home"}.get(
+                str(args.get("key") or "").lower()
+            )
+        if name == "wait_for_delay":
+            return "wait"
+        if name == "report_task_status":
+            return "done" if args.get("status") == "completed" else "fail"
+        return None
+
     async def _hybrid_decide(
         self,
         llm,
@@ -488,6 +533,8 @@ class FlashRunner:
         tail: HumanMessage,
         plan_text: str | None,
         cfg,
+        tried_taps: set[tuple[int, str]] | None = None,
+        tried_labels: set[str] | None = None,
     ) -> tuple | None:
         """One hybrid turn: describe → choose → tool call.
 
@@ -497,6 +544,11 @@ class FlashRunner:
         narrative (plus approximate coords for unlisted targets) that becomes
         the turn's thought text, so envelope-mangling and narration-only
         stalls cannot occur on this path.
+
+        ``tried_taps``/``tried_labels`` mask menu entries already attempted —
+        the decision model has no transcript view and would otherwise re-pick
+        a dead element indefinitely. Terminal meta-actions
+        (``wait``/``done``/``fail``) are never masked.
         """
         describe_prompt = Template(_HYBRID_DESCRIBE_PROMPT).render(
             goal=self.goal, plan=plan_text or "(no plan — describe and list elements)"
@@ -513,14 +565,26 @@ class FlashRunner:
         description = self._extract_response_text(response)
         logger.info(f"Hybrid describe: {description[:200]}")
 
-        menu = self._hybrid_action_menu(state)
+        menu = self._hybrid_action_menu(
+            state, tried_taps=tried_taps, tried_labels=tried_labels
+        )
+        tried_line = ""
+        if tried_taps or tried_labels:
+            masked = sorted(
+                set(self._hybrid_action_menu(state)) - set(menu)
+            )
+            if masked:
+                tried_line = (
+                    "\nAlready attempted without moving the task forward and"
+                    f" unavailable: {', '.join(masked)}."
+                )
         client = DecisionClient(
             cfg.url, model=cfg.model, timeout_seconds=cfg.timeout_seconds
         )
         state_text = (
             f"Goal: {self.goal}\n"
             f"Plan: {plan_text or 'none'}\n"
-            f"Current screen: {description}"
+            f"Current screen: {description}{tried_line}"
         )
         verdict = await client.achoose(
             state_text[-_HYBRID_MAX_STATE_CHARS:],
@@ -1426,6 +1490,18 @@ class FlashRunner:
         previous_turn: _TurnRecord | None = None
         pending_notices: list[str] = []
         no_tool_call_streak = 0
+        # Element taps already executed, by (index, label) identity plus a
+        # distinctive-label set that survives re-indexing. The decision model
+        # cannot see the transcript, so masked menu entries are the only
+        # thing stopping it from re-picking a dead element forever (observed
+        # live: three identical taps on an unchanged screen, and the same
+        # icon tapped again four turns later once it worked). Meta actions
+        # are tracked only as a consecutive-repeat streak — presses back/home
+        # can be legitimately repeated during navigation.
+        tried_taps: set[tuple[int, str]] = set()
+        tried_labels: set[str] = set()
+        hybrid_last_key: str | None = None
+        hybrid_repeat_streak = 0
 
         while limit is None or turns < limit:
             turns += 1
@@ -1466,12 +1542,23 @@ class FlashRunner:
             current_tools = report_only_tools if is_final else tools_declaration
 
             # Hybrid turn: describe → decision-model action pick. The final
-            # turn stays on the standard path (report_task_status only).
+            # turn stays on the standard path (report_task_status only), and
+            # a repeat streak escalates to the full model entirely.
             response = None
             tool_calls = None
-            if hybrid and not is_final:
+            if (
+                hybrid
+                and not is_final
+                and hybrid_repeat_streak < _HYBRID_REPEAT_ESCALATE
+            ):
                 decided = await self._hybrid_decide(
-                    llm, state, tail, plan_text, decision_cfg
+                    llm,
+                    state,
+                    tail,
+                    plan_text,
+                    decision_cfg,
+                    tried_taps=tried_taps,
+                    tried_labels=tried_labels,
                 )
                 if decided is not None:
                     response, tool_calls = decided
@@ -1543,6 +1630,46 @@ class FlashRunner:
                 continue
 
             no_tool_call_streak = 0
+
+            # Record executed actions for the repeat machinery: element taps
+            # join the masked sets by identity; the same menu key executed
+            # twice in a row counts as a consecutive repeat (the decision
+            # model picks it again because nothing told it the last one did
+            # nothing).
+            elements_now = getattr(state, "indexed_elements", None) or []
+            label_by_idx = {
+                el.get("index"): self._element_label(el)
+                for el in elements_now
+                if el.get("index") is not None
+            }
+            repeat_keys: list[str] = []
+            for tc in tool_calls:
+                key = self._menu_key_for_call(tc.get("name"), tc.get("args"))
+                if key is None:
+                    continue
+                if key.startswith("tap_"):
+                    idx = int(key[len("tap_"):])
+                    label = label_by_idx.get(idx, "")
+                    ident = (idx, label)
+                    if ident in tried_taps or (
+                        len(label) >= 4 and label in tried_labels
+                    ):
+                        repeat_keys.append(key)
+                    tried_taps.add(ident)
+                    if len(label) >= 4:
+                        tried_labels.add(label)
+                elif key == hybrid_last_key:
+                    repeat_keys.append(key)
+                hybrid_last_key = key
+            if repeat_keys:
+                hybrid_repeat_streak += 1
+                pending_notices.append(
+                    f"[NOTICE] {', '.join(sorted(set(repeat_keys)))} was already"
+                    " attempted and did not move the task forward. Pick a"
+                    " different action or navigate elsewhere first."
+                )
+            else:
+                hybrid_repeat_streak = 0
 
             # Process tool calls
             turn = _TurnRecord()

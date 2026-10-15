@@ -113,6 +113,28 @@ def test_choice_rejects_unknown_key():
     assert FlashRunner._menu_choice_to_call("launch_rocket", "") is None
 
 
+# --- executed call -> menu key mapping ------------------------------------------
+
+
+def test_menu_key_for_call_maps_device_actions():
+    f = FlashRunner._menu_key_for_call
+    assert f("click", {"target": 7, "target_description": "x"}) == "tap_7"
+    assert f("swipe", {"direction": "up"}) == "swipe_up"
+    assert f("swipe", {"gesture": "left"}) == "swipe_left"
+    assert f("press_key", {"key": "BACK"}) == "press_back"
+    assert f("press_key", {"key": "home"}) == "press_home"
+    assert f("wait_for_delay", {"time_in_ms": 500}) == "wait"
+    assert f("report_task_status", {"status": "completed"}) == "done"
+    assert f("report_task_status", {"status": "failed"}) == "fail"
+
+
+def test_menu_key_for_call_rejects_non_menu_calls():
+    f = FlashRunner._menu_key_for_call
+    assert f("click", {"target": "not-an-int"}) is None
+    assert f("swipe", {"start": [0, 0], "end": [1, 1]}) is None
+    assert f("input_text", {"text": "hi"}) is None
+
+
 # --- _hybrid_decide ------------------------------------------------------------
 
 
@@ -227,6 +249,73 @@ async def test_hybrid_decide_escalates_on_out_of_menu_verdict():
             AsyncMock(), _state([]), HumanMessage(content="x"), None, _cfg()
         )
     assert out is None
+
+
+@pytest.mark.asyncio
+async def test_hybrid_decide_masks_tried_menu_keys():
+    """Elements already tapped are removed from the menu by (index, label)
+    identity, so the decision model cannot re-pick a dead element."""
+    runner = _runner()
+    state = _state([{"index": 1, "text": "Alpha"}, {"index": 2, "text": "Beta"}])
+    with (
+        patch(
+            "artemis.agents.flash.runner.acomplete",
+            new=AsyncMock(return_value=AIMessage(content="desc")),
+        ),
+        patch("artemis.agents.flash.runner.DecisionClient") as MockClient,
+    ):
+        choose = AsyncMock(return_value=_verdict("tap_2"))
+        MockClient.return_value.achoose = choose
+        out = await runner._hybrid_decide(
+            AsyncMock(),
+            state,
+            HumanMessage(content="x"),
+            None,
+            _cfg(),
+            tried_taps={(1, "Alpha")},
+            tried_labels=set(),
+        )
+    assert out is not None
+    menu_sent = choose.call_args.args[2]
+    assert "tap_1" not in menu_sent
+    assert "tap_2" in menu_sent
+    # Terminal meta-actions are never masked — wait/done/fail stay available.
+    assert "wait" in menu_sent
+    assert "done" in menu_sent
+    # The decision state discloses what was masked so the pick has context.
+    state_sent = choose.call_args.args[0]
+    assert "tap_1" in state_sent
+
+
+@pytest.mark.asyncio
+async def test_hybrid_decide_masks_reindexed_label():
+    """A distinctive label stays masked even when the element list re-indexes
+    (the volatile-text problem that defeats screen signatures)."""
+    runner = _runner()
+    # Same "Settings" row, now at index 9 instead of 12.
+    state = _state([{"index": 9, "text": "Settings"}, {"index": 2, "text": "Beta"}])
+    with (
+        patch(
+            "artemis.agents.flash.runner.acomplete",
+            new=AsyncMock(return_value=AIMessage(content="desc")),
+        ),
+        patch("artemis.agents.flash.runner.DecisionClient") as MockClient,
+    ):
+        choose = AsyncMock(return_value=_verdict("tap_2"))
+        MockClient.return_value.achoose = choose
+        out = await runner._hybrid_decide(
+            AsyncMock(),
+            state,
+            HumanMessage(content="x"),
+            None,
+            _cfg(),
+            tried_taps={(12, "Settings")},
+            tried_labels={"Settings"},
+        )
+    assert out is not None
+    menu_sent = choose.call_args.args[2]
+    assert "tap_9" not in menu_sent
+    assert "tap_2" in menu_sent
 
 
 @pytest.mark.asyncio
