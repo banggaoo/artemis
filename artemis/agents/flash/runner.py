@@ -182,12 +182,13 @@ $plan
 
 Describe the CURRENT screenshot factually in 3-5 short sentences: which app
 and screen is shown, what has changed since the previous observation, and
-where the elements relevant to the goal sit. Then list EVERY interactive
-element from the attached list, one per line: [index] label ~[x,y] — the
-approximate normalized 0-1000 coordinate is only required for elements
-visible on screen but NOT in the list. Never claim an action was taken.
-Do not decide what to do next — a separate decision stage reads your
-description."""
+where the elements relevant to the goal sit. If the goal's next target is
+NOT visible, say so and note how it would be reached (e.g. open the app
+drawer, scroll, navigate back). Then list EVERY interactive element from
+the attached list, one per line: [index] label ~[x,y] — the approximate
+normalized 0-1000 coordinate is only required for elements visible on
+screen but NOT in the list. Never claim an action was taken. Do not decide
+what to do next — a separate decision stage reads your description."""
 
 # Menu entries the decision model may always pick, alongside the element
 # taps generated from the live index list. Free-text input is excluded by
@@ -610,6 +611,17 @@ class FlashRunner:
             logger.info(
                 f"Hybrid decision inconclusive (verdict={verdict.verdict!r} "
                 f"top_p={top_p:.2f} floor={floor:.2f}), escalating to tool-call turn"
+            )
+            return None
+        if verdict.verdict in ("done", "fail"):
+            # Terminal picks can never execute blind: the decision model sees
+            # no pixels and cannot verify goal completion — observed live
+            # declaring 'done' on a screen where the target app wasn't even
+            # open. The standard turn re-verifies against the screenshot and
+            # keeps report_task_status available to do it honestly.
+            logger.info(
+                f"Hybrid terminal pick {verdict.verdict!r} (top_p={top_p:.2f}) "
+                "— escalating to the VLM turn for verification"
             )
             return None
         tool_call = self._menu_choice_to_call(str(verdict.verdict), description)

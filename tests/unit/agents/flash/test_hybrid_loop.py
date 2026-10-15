@@ -319,6 +319,30 @@ async def test_hybrid_decide_masks_reindexed_label():
 
 
 @pytest.mark.asyncio
+async def test_hybrid_decide_never_executes_terminal_picks():
+    """done/fail escalate to the VLM turn — the decision model sees no pixels
+    and cannot honestly verify goal completion (observed live declaring
+    'done' on a home screen where the target app wasn't open)."""
+    runner = _runner()
+    for pick in ("done", "fail"):
+        with (
+            patch(
+                "artemis.agents.flash.runner.acomplete",
+                new=AsyncMock(return_value=AIMessage(content="desc")),
+            ),
+            patch("artemis.agents.flash.runner.DecisionClient") as MockClient,
+        ):
+            MockClient.return_value.achoose = AsyncMock(
+                return_value=_verdict(pick, confidence=0.95)
+            )
+            out = await runner._hybrid_decide(
+                AsyncMock(), _state([{"index": 1}]), HumanMessage(content="x"),
+                None, _cfg(),
+            )
+        assert out is None, pick
+
+
+@pytest.mark.asyncio
 async def test_hybrid_decide_escalates_on_describe_failure():
     runner = _runner()
     with patch(
