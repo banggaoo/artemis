@@ -800,3 +800,48 @@ async def test_verbatim_dead_call_set_is_suppressed_not_reexecuted(mock_context)
         if isinstance(m, ToolMessage) and "was already executed" in str(m.content)
     )
     assert err.status == "error"
+
+
+@pytest.mark.asyncio
+async def test_ping_pong_cycle_triggers_alternation_notice(mock_context):
+    """click → BACK → same click is an A,B,A cycle: screens change every
+    turn so verbatim suppression cannot see it, but the turn-3 re-issue of
+    the turn-1 call on a matching screen must raise the alternation
+    notice."""
+    home = [{"index": 1, "text": "home", "center": (100, 100)}]
+    wifi = [{"index": 1, "text": "wifi page", "center": (200, 200)}]
+
+    def _exec(name, args, tc_id, state, **_):
+        if state is not None:
+            state.indexed_elements = list(
+                wifi if name == "click" else home
+            )
+        return _exec_result(tc_id, name, f"IMG-{tc_id}".encode())
+
+    enter = {"name": "click", "args": {"target": 11}, "id": "c1"}
+    back = {"name": "press_key", "args": {"key": "BACK"}, "id": "b1"}
+    reenter = {"name": "click", "args": {"target": 11}, "id": "c2"}
+    responses = [
+        AIMessage(content="enter", tool_calls=[enter]),
+        AIMessage(content="back", tool_calls=[back]),
+        AIMessage(content="enter again", tool_calls=[reenter]),
+        _report(status="failed", explanation="loop"),
+    ]
+    with (
+        patch("artemis.controllers.unified_controller.get_driver"),
+        patch(
+            "artemis.agents.flash.runner.capture_screenshot_and_parse_ui",
+            AsyncMock(return_value=_INITIAL_OBSERVATION),
+        ),
+    ):
+        runner = _make_runner(mock_context, responses, max_turns=0)
+        runner.executor.execute = AsyncMock(side_effect=_exec)
+        state = State(initial_goal="Check Wi-Fi state")
+        state.indexed_elements = list(home)
+        await runner.run(state)
+
+    turn4_messages = runner.calls[3]["messages"]
+    assert any(
+        "alternating between two screens" in str(m.content)
+        for m in turn4_messages
+    )

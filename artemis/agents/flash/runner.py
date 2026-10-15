@@ -1792,6 +1792,13 @@ class FlashRunner:
         # Whether the previous turn's actions left the screen unchanged —
         # the pre-execution half of verbatim dead-call suppression.
         prev_turn_unchanged = False
+        # Sliding histories for cycle detection: an A,B,A,B ping-pong (enter
+        # a page, back out, re-enter — observed live on Network & internet)
+        # never repeats a call verbatim and every screen "changes", so it
+        # escapes dead-call tracking. The give-away is re-issuing the call
+        # from two turns ago on a matching screen.
+        call_sig_history: list[str] = []
+        pre_sig_history: list[frozenset] = []
 
         while limit is None or turns < limit:
             turns += 1
@@ -2063,16 +2070,35 @@ class FlashRunner:
             verbatim_repeat = (
                 unchanged and call_sig and call_sig == hybrid_last_call_sig
             )
+            ping_pong = (
+                bool(call_sig)
+                and len(call_sig_history) >= 2
+                and call_sig == call_sig_history[-2]
+                and self._signatures_similar(pre_sig, pre_sig_history[-2])
+            )
             hybrid_last_call_sig = call_sig
             prev_turn_unchanged = unchanged
-            if repeat_keys or verbatim_repeat:
+            call_sig_history.append(call_sig)
+            pre_sig_history.append(pre_sig)
+            del call_sig_history[:-12]
+            del pre_sig_history[:-12]
+            if repeat_keys or verbatim_repeat or ping_pong:
                 hybrid_repeat_streak += 1
                 noted = repeat_keys or ["the same action"]
                 nav = self._navigation_suggestions(elements_now)
-                notice = (
-                    f"[NOTICE] {', '.join(sorted(set(noted)))} was already"
-                    " attempted and did not move the task forward."
-                )
+                if ping_pong and not repeat_keys and not verbatim_repeat:
+                    notice = (
+                        "[NOTICE] You are alternating between two screens —"
+                        " this action was already tried two steps ago and the"
+                        " following action undid it. Do not go back and"
+                        " forth: commit to a direction, finish the goal on"
+                        " the current screen, or report the task status."
+                    )
+                else:
+                    notice = (
+                        f"[NOTICE] {', '.join(sorted(set(noted)))} was already"
+                        " attempted and did not move the task forward."
+                    )
                 if nav:
                     notice += f" Available navigation elements instead: {nav}."
                 if hybrid_repeat_streak >= 3:
