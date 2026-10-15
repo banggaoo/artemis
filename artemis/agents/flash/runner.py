@@ -182,12 +182,12 @@ $plan
 
 Describe the CURRENT screenshot factually in 3-5 short sentences: which app
 and screen is shown, what has changed since the previous observation, and
-where the elements relevant to the goal sit. For every element relevant to
-the goal give one line: [index] label ~[x,y] — the index from the attached
-element list when the element is listed there, and a normalized 0-1000
-[x,y] coordinate only when it is visible on screen but NOT in the list.
-Never claim an action was taken. Do not decide what to do next — a separate
-decision stage reads your description."""
+where the elements relevant to the goal sit. Then list EVERY interactive
+element from the attached list, one per line: [index] label ~[x,y] — the
+approximate normalized 0-1000 coordinate is only required for elements
+visible on screen but NOT in the list. Never claim an action was taken.
+Do not decide what to do next — a separate decision stage reads your
+description."""
 
 # Menu entries the decision model may always pick, alongside the element
 # taps generated from the live index list. Free-text input is excluded by
@@ -588,7 +588,7 @@ class FlashRunner:
         )
         verdict = await client.achoose(
             state_text[-_HYBRID_MAX_STATE_CHARS:],
-            "Which single action moves the task forward?",
+            f"Which single action best advances this goal: {self.goal}",
             menu,
         )
         # For `choice` answers the decision gate is the top-pick probability
