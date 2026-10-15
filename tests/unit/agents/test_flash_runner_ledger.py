@@ -845,3 +845,34 @@ async def test_ping_pong_cycle_triggers_alternation_notice(mock_context):
         "alternating between two screens" in str(m.content)
         for m in turn4_messages
     )
+
+
+@pytest.mark.asyncio
+async def test_repeated_suppressed_calls_fail_after_streak(mock_context):
+    """Suppression prevents re-execution, not repetition — a model that
+    re-issues the same dead call a third time is stuck; end honestly
+    instead of burning the turn budget."""
+    def _call(i):
+        return {
+            "name": "click",
+            "args": {"target": 12},
+            "id": f"tc-{i}",
+        }
+    responses = [
+        AIMessage(content="t", tool_calls=[_call(i)]) for i in range(5)
+    ]
+    with (
+        patch("artemis.controllers.unified_controller.get_driver"),
+        patch(
+            "artemis.agents.flash.runner.capture_screenshot_and_parse_ui",
+            AsyncMock(return_value=_INITIAL_OBSERVATION),
+        ),
+    ):
+        runner = _make_runner(mock_context, responses, max_turns=0)
+        result = await runner.run(State(initial_goal="Toggle a switch"))
+
+    assert result["status"] == "failed"
+    assert "suppressed" in result["explanation"]
+    # First call executed once; calls 2 and 3 were suppressed; streak 3
+    # ended the run before calls 4-5 were ever consumed.
+    assert runner.executor.execute.await_count == 1

@@ -2011,6 +2011,23 @@ class FlashRunner:
                     )
                 pending_notices.append(notice)
                 hybrid_repeat_streak += 1
+                if hybrid_repeat_streak >= 3:
+                    # Third verbatim re-issue of a call that was suppressed
+                    # with an explicit "not re-run" error — the model cannot
+                    # break this loop itself (observed: 30+ turns of the same
+                    # suppressed click until the turn cap). Fail honestly
+                    # instead of burning the rest of the budget.
+                    ledger.stage_turn(messages[turn_base:])
+                    if self.summarizer:
+                        await self.summarizer.flush()
+                    return {
+                        "status": "failed",
+                        "explanation": (
+                            "The agent kept re-issuing an action that was"
+                            " already suppressed for having no effect, and"
+                            " could not find an alternative way forward."
+                        ),
+                    }
                 (
                     current_pre_screenshot_bytes,
                     current_xml_list,
