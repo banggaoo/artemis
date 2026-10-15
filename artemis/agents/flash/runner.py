@@ -171,9 +171,11 @@ _FINAL_TURN_WARNING = "[WARNING] This is your final turn; only 'report_task_stat
 _HYBRID_PLAN_PROMPT = """You are the planning stage of a UI testing agent.
 GOAL: $goal
 
-Decompose the goal into 3-8 short ordered milestones (one per line, starting
-with '- '). Each milestone names a screen state or interaction step, not a
-tool call. Output only the milestone list."""
+Given the attached CURRENT screenshot and element list, decompose the goal
+into 3-8 short ordered milestones (one per line, starting with '- '). Each
+milestone names a screen state or interaction step visible or reachable
+from here — including how to reach off-screen targets (e.g. the app drawer
+opens with a swipe up). Output only the milestone list."""
 
 _HYBRID_DESCRIBE_PROMPT = """You are the perception stage of a UI testing agent.
 GOAL: $goal
@@ -406,17 +408,30 @@ class FlashRunner:
     # Hybrid loop (decision.flash_loop): VLM describes, decision model acts
     # ------------------------------------------------------------------
 
-    async def _hybrid_plan(self, llm) -> str | None:
+    async def _hybrid_plan(self, llm, img_bytes=None, xml_list=None) -> str | None:
         """The one upfront planning call — Pro's planner leg grafted into Flash.
 
         A plain completion (no tools): the VLM emits a milestone list that the
-        per-turn describe prompt carries as context. Failure is non-fatal — the
-        loop still runs, just without plan guidance.
+        per-turn describe prompt carries as context. The call is grounded on
+        the first observation — a plan made blind degenerates to boilerplate
+        ("load login screen" for a Settings task, observed live). Failure is
+        non-fatal — the loop still runs, just without plan guidance.
         """
         prompt = Template(_HYBRID_PLAN_PROMPT).render(goal=self.goal)
+        blocks: list[dict] = [{"type": "text", "text": prompt}]
+        if img_bytes:
+            blocks.append({"type": "text", "text": "--- Current Screenshot ---"})
+            blocks.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_data_uri(base64.b64encode(img_bytes).decode())},
+                }
+            )
+        if xml_list:
+            blocks.append({"type": "text", "text": f"{PRO_UI_LIST_MARKER}\n{xml_list}"})
         try:
             response = await invoke_llm_with_timeout_message(
-                acomplete(llm, [HumanMessage(content=prompt)]),
+                acomplete(llm, [HumanMessage(content=blocks)]),
                 timeout_seconds=10,
                 hard_timeout=settings.LLM_FLASH_HARD_TIMEOUT_SECONDS,
             )
@@ -1484,15 +1499,15 @@ class FlashRunner:
             and getattr(decision_cfg, "enabled", False)
             and getattr(decision_cfg, "flash_loop", False)
         )
-        plan_text = None
-        if hybrid:
-            logger.info("Hybrid Flash loop enabled: VLM describes, decision model acts.")
-            plan_text = await self._hybrid_plan(llm)
-
         tools_declaration = self._get_tools()
         report_only_tools = [t for t in tools_declaration if t.name == "report_task_status"]
 
         ledger, img_bytes, xml_list = await self._prepare_conversation(state, tools_declaration)
+
+        plan_text = None
+        if hybrid:
+            logger.info("Hybrid Flash loop enabled: VLM describes, decision model acts.")
+            plan_text = await self._hybrid_plan(llm, img_bytes, xml_list)
 
         turns = 0
         action_sequence = 0
