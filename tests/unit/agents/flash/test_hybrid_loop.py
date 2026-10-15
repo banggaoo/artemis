@@ -319,6 +319,29 @@ async def test_hybrid_decide_masks_reindexed_label():
 
 
 @pytest.mark.asyncio
+async def test_hybrid_decide_escalates_when_target_not_visible():
+    """A not-visible marker escalates: between-screen navigation is the VLM
+    path's job — the decision model only picks among on-screen elements."""
+    runner = _runner()
+    describe = AIMessage(content="Home screen. Settings would be in the app drawer.\nTARGET: not-visible")
+    choose = AsyncMock()
+    with (
+        patch(
+            "artemis.agents.flash.runner.acomplete",
+            new=AsyncMock(return_value=describe),
+        ),
+        patch("artemis.agents.flash.runner.DecisionClient") as MockClient,
+    ):
+        MockClient.return_value.achoose = choose
+        out = await runner._hybrid_decide(
+            AsyncMock(), _state([{"index": 1}]), HumanMessage(content="x"),
+            None, _cfg(),
+        )
+    assert out is None
+    choose.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_hybrid_decide_never_executes_terminal_picks():
     """done/fail escalate to the VLM turn — the decision model sees no pixels
     and cannot honestly verify goal completion (observed live declaring

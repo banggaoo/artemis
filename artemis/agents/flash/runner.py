@@ -193,8 +193,12 @@ NOT visible, say so and note how it would be reached (e.g. open the app
 drawer, scroll, navigate back). Then list EVERY interactive element from
 the attached list, one per line: [index] label ~[x,y] — the approximate
 normalized 0-1000 coordinate is only required for elements visible on
-screen but NOT in the list. Never claim an action was taken. Do not decide
-what to do next — a separate decision stage reads your description."""
+screen but NOT in the list. End with exactly one marker line:
+TARGET: visible — the goal's next interactive target is on this screen
+TARGET: not-visible — it is not; navigation is needed first
+TARGET: reached — the goal state is already achieved
+Never claim an action was taken. Do not decide what to do next — a
+separate decision stage reads your description."""
 
 # Menu entries the decision model may always pick, alongside the element
 # taps generated from the live index list. Free-text input is excluded by
@@ -584,6 +588,22 @@ class FlashRunner:
             return None
         description = self._extract_response_text(response)
         logger.info(f"Hybrid describe: {description[:200]}")
+
+        # Visibility gate: when the describe pass reports the goal's next
+        # target is not on this screen (or already reached), the right move
+        # is between-screen navigation or goal verification — both VLM
+        # strengths. The decision model only chooses among on-screen
+        # elements; observed live: absent-target screens make it pick
+        # press_home/wait/done on repeat.
+        marker = re.search(
+            r"TARGET:\s*(visible|not-visible|reached)", description
+        )
+        if marker and marker.group(1) != "visible":
+            logger.info(
+                f"Hybrid describe reports {marker.group(1)} — escalating "
+                "the navigation turn to the VLM path"
+            )
+            return None
 
         menu = self._hybrid_action_menu(
             state, tried_taps=tried_taps, tried_labels=tried_labels
