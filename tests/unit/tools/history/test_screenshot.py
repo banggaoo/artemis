@@ -49,9 +49,9 @@ def test_pre_and_post_screenshots_are_attached_as_content_blocks(tmp_path):
     assert shot.image_bytes == pre.read_bytes()
     assert shot.description == "Screenshot of step 2 (pre-action) is attached."
     blocks = shot.to_content_blocks()
-    assert blocks[0] == {"type": "text", "text": shot.description}
-    assert blocks[1]["type"] == "image_url"
-    url = blocks[1]["image_url"]["url"]
+    assert blocks[1] == {"type": "text", "text": shot.description}
+    assert blocks[0]["type"] == "image_url"
+    url = blocks[0]["image_url"]["url"]
     assert url.startswith("data:image/jpeg;base64,")
     assert base64.b64decode(url.split(",", 1)[1]) == pre.read_bytes()
 
@@ -151,7 +151,7 @@ async def test_tool_execute_returns_blocks_or_text(tmp_path):
     pre = _jpeg_file(tmp_path)
     ctx = SimpleNamespace(data_engine=_reader(pre=pre))
     out = await get_step_screenshot.execute(ctx=ctx, step_number=1, which="pre")
-    assert isinstance(out, list) and out[1]["type"] == "image_url"
+    assert isinstance(out, list) and out[0]["type"] == "image_url"
 
     out = await get_step_screenshot.execute(ctx=ctx, step_number=1, which="post")
     assert out == "No post-action screenshot recorded for step 1."

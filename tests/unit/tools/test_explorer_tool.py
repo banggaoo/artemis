@@ -349,13 +349,13 @@ def test_render_operator_blocks_adds_the_annotated_image(tmp_path):
     assert kwargs["color"] == "magenta"
 
     assert isinstance(result, list) and len(result) == 2
-    assert result[0]["type"] == "text"
-    assert "Explorer located 1 candidate(s)" in result[0]["text"]
+    assert result[1]["type"] == "text"
+    assert "Explorer located 1 candidate(s)" in result[1]["text"]
     # The Operator's click takes a bare integer index.
-    assert "target=3, a bare integer" in result[0]["text"]
-    assert "target=[x, y]" not in result[0]["text"]
-    assert result[1]["type"] == "image_url"
-    assert result[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert "target=3, a bare integer" in result[1]["text"]
+    assert "target=[x, y]" not in result[1]["text"]
+    assert result[0]["type"] == "image_url"
+    assert result[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
 
 def test_render_operator_blocks_numbers_annotations_sequentially(tmp_path):
@@ -547,8 +547,8 @@ async def test_langchain_tool_uses_the_operator_presentation(tmp_path):
         )
 
     assert tool.name == "ask_explorer"
-    assert isinstance(result, list) and result[1]["type"] == "image_url"
-    assert "- [1] 'B' at normalized [500, 500]" in result[0]["text"]
+    assert isinstance(result, list) and result[0]["type"] == "image_url"
+    assert "- [1] 'B' at normalized [500, 500]" in result[1]["text"]
 
 
 @pytest.mark.asyncio
@@ -582,7 +582,7 @@ async def test_run_explorer_logic_replay_shim_returns_operator_blocks(tmp_path):
 
     assert instance.run.await_args.kwargs["version"] == "ultra"
     assert isinstance(result, list) and len(result) == 2
-    assert result[0]["type"] == "text" and result[1]["type"] == "image_url"
+    assert result[0]["type"] == "image_url" and result[1]["type"] == "text"
     assert state.indexed_points == [[540, 1200]]
 
 
