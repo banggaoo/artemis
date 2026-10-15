@@ -165,6 +165,15 @@ def _is_semantic_empty(node: dict[str, Any]) -> bool:
     if "image" in class_name or "icon" in class_name or "photo" in class_name:
         return False
 
+    # Stateful controls carry their state as the semantic value even when
+    # unlabeled (observed: a Settings Switch node with no text/desc was pruned
+    # as decoration, leaving the agent blind to whether it was on or off).
+    checkable = node.get("checkable")
+    if checkable is True or str(checkable).lower() == "true":
+        return False
+    if str(node.get("checked") or "").lower() == "true":
+        return False
+
     return True
 
 

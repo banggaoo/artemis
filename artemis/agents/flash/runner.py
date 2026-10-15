@@ -625,9 +625,10 @@ class FlashRunner:
         # screen listing no Settings). No match → the VLM handles the
         # between-screen navigation turn instead.
         if not self._menu_has_goal_target(menu, self.goal):
+            tap_labels = [v for k, v in menu.items() if k.startswith("tap_")]
             logger.info(
                 "Hybrid menu holds no goal-relevant element — escalating "
-                "the navigation turn to the VLM path"
+                f"the navigation turn to the VLM path (labels: {tap_labels[:12]})"
             )
             return None
         tried_line = ""
