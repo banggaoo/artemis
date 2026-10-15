@@ -640,6 +640,18 @@ class FlashRunner:
         description = self._extract_response_text(response)
         logger.info(f"Hybrid describe: {description[:200]}")
 
+        # Goal-achieved marker: a 'reached' describe is a perception claim,
+        # not a menu pick — hand the turn to the VLM, which can look at the
+        # screen itself and call report_task_status. The terminal-boundary
+        # check then audits that claim against device state, so a premature
+        # 'reached' costs a verification round-trip, not a false completion.
+        if re.search(r"(?im)^\s*target:\s*reached\b", description):
+            logger.info(
+                "Hybrid describe reports TARGET: reached — escalating to the "
+                "VLM turn for verification"
+            )
+            return None
+
         menu = self._hybrid_action_menu(
             state, tried_taps=tried_taps, tried_labels=tried_labels
         )

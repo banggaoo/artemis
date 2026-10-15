@@ -362,3 +362,94 @@ def test_normalize_helper_elements_tolerates_bad_input():
     assert normalize_helper_elements(None) == []
     assert normalize_helper_elements("x") == []
     assert normalize_helper_elements({"clickable": True}) == [{"clickable": "true"}]
+
+
+# --------------------------------------------------------------------------- #
+# Degenerate hierarchy retry (system-windows-only capture while an app is up)
+# --------------------------------------------------------------------------- #
+
+SYSTEM_XML = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<hierarchy rotation="0">'
+    '<node index="0" text="" class="android.widget.TextView" '
+    'package="com.android.systemui" content-desc="Battery 100 percent." '
+    'checkable="false" checked="false" clickable="false" enabled="true" '
+    'focusable="false" focused="false" scrollable="false" long-clickable="false" '
+    'password="false" selected="false" visible-to-user="true" '
+    'bounds="[0,0][100,60]" />'
+    "</hierarchy>"
+)
+
+
+def _snapshot(xml: str) -> bytes:
+    return json.dumps(
+        {
+            "success": True,
+            "has_screenshot": True,
+            "screenshot_base64": "QUJD",
+            "xml": xml,
+            "width": 1080,
+            "height": 2400,
+        }
+    ).encode()
+
+
+def test_system_windows_only_with_app_foreground_retries_snapshot(client):
+    c, _ = client
+    with (
+        _urlopen() as urlopen,
+        patch.object(AccessibilityClient, "_foreground_is_app", return_value=True),
+        patch("artemis.clients.accessibility_client.time.sleep"),
+    ):
+        urlopen.side_effect = [
+            _response(_snapshot(SYSTEM_XML)),
+            _response(_snapshot(XML)),
+        ]
+        data = c.get_screen_data()
+    assert urlopen.call_count == 2
+    assert data.hierarchy_xml == XML
+    assert any(el.get("package") == "app" for el in data.elements)
+
+
+def test_system_windows_only_with_system_foreground_does_not_retry(client):
+    """Lock screen / status bar alone is a legitimate all-system tree — the
+    retry must not fire when no app is foreground."""
+    c, _ = client
+    with (
+        _urlopen() as urlopen,
+        patch.object(AccessibilityClient, "_foreground_is_app", return_value=False),
+        patch("artemis.clients.accessibility_client.time.sleep") as sleep,
+    ):
+        urlopen.return_value = _response(_snapshot(SYSTEM_XML))
+        data = c.get_screen_data()
+    assert urlopen.call_count == 1
+    sleep.assert_not_called()
+    assert data.hierarchy_xml == SYSTEM_XML
+
+
+def test_system_windows_retry_keeps_first_when_still_degenerate(client):
+    c, _ = client
+    with (
+        _urlopen() as urlopen,
+        patch.object(AccessibilityClient, "_foreground_is_app", return_value=True),
+        patch("artemis.clients.accessibility_client.time.sleep"),
+    ):
+        urlopen.side_effect = [
+            _response(_snapshot(SYSTEM_XML)),
+            _response(_snapshot(SYSTEM_XML)),
+        ]
+        data = c.get_screen_data()
+    assert urlopen.call_count == 2
+    assert data.hierarchy_xml == SYSTEM_XML
+
+
+def test_foreground_probe_failure_means_no_retry(client):
+    c, _ = client
+    with (
+        _urlopen() as urlopen,
+        patch.object(AccessibilityClient, "_foreground_is_app", return_value=False),
+        patch("artemis.clients.accessibility_client.time.sleep"),
+    ):
+        urlopen.return_value = _response(_snapshot(SYSTEM_XML))
+        c.get_screen_data()
+    assert urlopen.call_count == 1

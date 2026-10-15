@@ -38,6 +38,7 @@ from __future__ import annotations
 from io import BytesIO
 import json
 import subprocess
+import time
 from typing import Any
 import urllib.error
 import urllib.request
@@ -343,9 +344,80 @@ class AccessibilityClient:
             return xml, parse_hierarchy_xml_to_elements(xml)
         return "", normalize_helper_elements(dump.get("elements"))
 
+    # Packages that own only system chrome windows (status bar, nav bar,
+    # notification shade headers). A capture where every node belongs to
+    # these means the app window was missed. The lock screen legitimately
+    # produces such a tree — which is why the retry also requires the
+    # foreground to be a different package.
+    _SYSTEM_WINDOW_PACKAGES = frozenset({"android", "com.android.systemui"})
+
+    @classmethod
+    def _only_system_windows(cls, elements: list[dict[str, Any]]) -> bool:
+        """True when a parsed dump holds nothing but system-chrome nodes.
+
+        Wrapper nodes without a ``package`` attribute (the ``<hierarchy>``
+        root) carry no evidence either way and are skipped; a dump with no
+        packaged node at all is a different failure mode and is not retried
+        here.
+        """
+        packages = [str(el.get("package") or "") for el in elements if el.get("package")]
+        return bool(packages) and all(
+            p in cls._SYSTEM_WINDOW_PACKAGES or p.startswith("com.android.systemui.")
+            for p in packages
+        )
+
+    def _foreground_is_app(self) -> bool:
+        """True when ``dumpsys`` reports a non-system resumed/visible package —
+        i.e. an app is on screen but the hierarchy missed its window."""
+        try:
+            out = subprocess.run(
+                adb_command(
+                    ["-s", self._device_id, "shell", "dumpsys", "activity", "activities"]
+                ),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=10,
+                check=True,
+                text=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.debug(f"Foreground package probe failed on {self._device_id}: {exc}")
+            return False
+        from artemis.utils.app_launch_utils import parse_foreground_task
+
+        task = parse_foreground_task(out.stdout)
+        package = task.resumed_package or task.base_package if task else None
+        if not package:
+            return False
+        return not (
+            package in self._SYSTEM_WINDOW_PACKAGES
+            or package.startswith("com.android.systemui.")
+        )
+
     def get_screen_data(self) -> UIAutomatorScreenData:
         snapshot = self._snapshot()
         xml, elements = self._elements_from_dump(snapshot)
+        if self._only_system_windows(elements) and self._foreground_is_app():
+            # A status-bar-only window set while an app is foreground is a
+            # degenerate capture — the helper's window list briefly loses the
+            # app window during transitions/ANRs (observed live: menus showing
+            # nothing but clock/battery/notification nodes on a fully rendered
+            # Settings screen). One delayed retry usually restores it.
+            logger.warning(
+                f"Accessibility helper on {self._device_id} returned a "
+                "system-windows-only hierarchy while an app is foreground; "
+                "re-snapshotting once."
+            )
+            try:
+                time.sleep(0.6)
+                retry = self._snapshot()
+                retry_xml, retry_elements = self._elements_from_dump(retry)
+                if not self._only_system_windows(retry_elements):
+                    snapshot, xml, elements = retry, retry_xml, retry_elements
+                else:
+                    logger.warning("Re-snapshot still returned system windows only.")
+            except Exception as exc:
+                logger.warning(f"Hierarchy re-snapshot failed ({exc}); keeping the first.")
         if snapshot.get("has_screenshot") and snapshot.get("screenshot_base64"):
             width, height = _dimensions(snapshot)
             return UIAutomatorScreenData(
