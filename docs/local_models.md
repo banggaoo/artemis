@@ -5,9 +5,9 @@ grounding, OCR helpers) from a single local multimodal model — and it can
 pull and serve that model itself, no external serving stack or cloud key
 required.
 
-Tested reference setup: **Gemma 4 E4B (4-bit, MLX)** on Apple Silicon —
-~6 GB resident, ~40 tok/s decode, both `flash` and `pro` profiles verified
-end-to-end on a real device.
+Reference setup: **Gemma 4 E4B (4-bit, MLX)** on Apple Silicon.
+This guide covers local serving and the Flash profile. Runtime memory and
+latency depend on image resolution, context length, and background load.
 
 ## 1. Install the local-model extra (Apple Silicon)
 
@@ -80,8 +80,6 @@ servers get copyable commands for their own tooling.
 
 ```bash
 uv run artemis run "Open Settings" --profile flash
-# or the heavier planner/operator/checker loop:
-uv run artemis run "Open Reminders" --profile pro
 ```
 
 ## BYO: any OpenAI-compatible server
@@ -107,11 +105,6 @@ guidance for non-catalog aliases).
   defaults.
 - **Structured output**: strict JSON-schema `response_format` is not
   required — ARTEMIS uses function-calling for structured nodes.
-- **Termination**: 4B-class models can recognize the goal yet keep
-  deliberating instead of ending the turn. The Pro/operator loop exposes a
-  `mark_done` tool for this: the model calls it when the goal is met, and the
-  convergence gate routes the claim to final verification — a false claim is
-  rejected and the run continues. Goals that cannot be achieved (e.g. a
-  required app is not installed) should be marked `[!]` blocked in the plan;
-  an all-resolved plan also routes to settlement instead of looping.
+- **Termination**: Flash uses `report_task_status` for completion and failure.
+  This change does not alter the Pro plan/convergence contract.
 - **Memory**: budget ~6 GB for a 4-bit 4B vision model + KV cache.

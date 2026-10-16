@@ -180,20 +180,10 @@ class DecisionLayerConfig(BaseModel):
             "'multilingual')."
         ),
     )
-    confidence_threshold: float = Field(
-        default=0.85,
-        ge=0.0,
-        le=1.0,
-        description="Answers below this confidence escalate to the LLM path.",
-    )
     timeout_seconds: float = Field(
         default=5.0,
         gt=0,
         description="Per-request decision timeout; expiry escalates to the LLM path.",
-    )
-    planner_validation: bool = Field(
-        default=True,
-        description="Offload the advisory planner milestone review to the decision layer.",
     )
     flash_loop: bool = Field(
         default=False,

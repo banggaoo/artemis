@@ -175,10 +175,6 @@ class UniversalRunnerMixin:
                     f"{minimal_list}\n"
                 ),
             },
-            {
-                "type": "image_url",
-                "image_url": {"url": image_data_uri(img_b64)},
-            },
         ]
 
         messages: list[BaseMessage] = [

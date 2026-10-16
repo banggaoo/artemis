@@ -404,17 +404,6 @@ def format_minimal_list_with_elements(
         hint = str(node.get("hint") or "").strip()
         error = str(node.get("error") or "").strip()
         shown = text.strip() or hint
-        # Unlabeled stateful controls (switches/checkboxes carry no text — the
-        # label lives on a sibling node): synthesize a label from the widget
-        # class plus its state so the agent can both see the control and tell
-        # whether it is currently on or off.
-        is_stateful = str(node.get("checkable") or "").lower() == "true" or str(
-            node.get("checked") or ""
-        ).lower() == "true"
-        if not shown and is_stateful:
-            widget = str(node.get("class") or node.get("className") or "").rsplit(".", 1)[-1]
-            state_word = "on" if str(node.get("checked") or "").lower() == "true" else "off"
-            shown = f"{widget or 'Control'} ({state_word})"
         if not registered and shown and bounds:
             left, top, right, bottom = bounds
             cx, cy = get_center_coordinates(left, top, right, bottom)
@@ -422,11 +411,7 @@ def format_minimal_list_with_elements(
                 continue
 
             norm_bounds = normalize_bounds(left, top, right, bottom)
-            kind = (
-                "Text"
-                if text.strip()
-                else "Control" if is_stateful and not hint else "Hint"
-            )
+            kind = "Text" if text.strip() else "Hint"
             line = f"[{idx}] {kind}: '{shown}' | Bounds: {norm_bounds}"
             if error:
                 line += f" | Error: '{error}'"
@@ -443,15 +428,9 @@ def format_minimal_list_with_elements(
                 "is_ocr": False,
             }
             if not text.strip():
-                if is_stateful and not hint:
-                    element["is_control"] = True
-                else:
-                    element["is_hint"] = True
+                element["is_hint"] = True
             if error:
                 element["error"] = error
-            if is_stateful:
-                element["checkable"] = node.get("checkable")
-                element["checked"] = node.get("checked")
             elements.append(element)
             labels.append(str(idx))
             added_items.append((shown, cx, cy))

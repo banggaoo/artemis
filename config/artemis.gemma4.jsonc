@@ -301,11 +301,9 @@
       // `artemis model serve laya -p 11435` provisions a matching server.
       "url": "http://127.0.0.1:11435/v1/systemone",
       "model": "typed-decisions",
-      "confidence_threshold": 0.85,
       // Generous: laya-serve serializes requests — a stalled predecessor plus
       // memory pressure pushes single decisions well past 5s (measured ~10-25s).
       "timeout_seconds": 15.0,
-      "planner_validation": true, // offload the advisory milestone review first
       // Hybrid Flash loop: Gemma plans once, then per turn describes the
       // screen (text only — no tool-call envelopes to mangle), and the
       // decision model picks the next action from a fixed menu of element

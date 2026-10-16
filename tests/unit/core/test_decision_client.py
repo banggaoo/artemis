@@ -16,7 +16,6 @@
 
 import io
 import json
-from types import SimpleNamespace
 from unittest.mock import patch
 import urllib.error
 
@@ -117,68 +116,3 @@ async def test_anoul_async_wrapper():
         result = await client.anoul("s", "q?")
     assert result.verdict is True
     assert result.confidence == 0.95
-
-
-# --- Planner wiring (_try_decision_layer) -------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_planner_decision_layer_disabled_returns_none():
-    from artemis.agents.planner.planner import _try_decision_layer
-
-    ctx = SimpleNamespace(agent_config=SimpleNamespace(
-        decision=SimpleNamespace(enabled=False)))
-    assert await _try_decision_layer(ctx, "goal", "before", "after") is None
-
-
-@pytest.mark.asyncio
-async def test_planner_decision_layer_answers_above_threshold():
-    from artemis.agents.planner.planner import _try_decision_layer
-    from artemis.core.decision_client import DecisionResult
-
-    ctx = SimpleNamespace(agent_config=SimpleNamespace(
-        decision=SimpleNamespace(
-            enabled=True, planner_validation=True,
-            url="http://x", model="laya",
-            confidence_threshold=0.85, timeout_seconds=5.0)))
-    with patch(
-        "artemis.core.decision_client.DecisionClient.anoul",
-        return_value=DecisionResult(verdict=True, confidence=0.9),
-    ):
-        out = await _try_decision_layer(ctx, "goal", "before", "after")
-    assert out["status"] == "success"
-    assert "approved" in out["feedback"]
-
-
-@pytest.mark.asyncio
-async def test_planner_decision_layer_escalates_below_threshold():
-    from artemis.agents.planner.planner import _try_decision_layer
-    from artemis.core.decision_client import DecisionResult
-
-    ctx = SimpleNamespace(agent_config=SimpleNamespace(
-        decision=SimpleNamespace(
-            enabled=True, planner_validation=True,
-            url="http://x", model="laya",
-            confidence_threshold=0.85, timeout_seconds=5.0)))
-    with patch(
-        "artemis.core.decision_client.DecisionClient.anoul",
-        return_value=DecisionResult(verdict=True, confidence=0.4),
-    ):
-        assert await _try_decision_layer(ctx, "goal", "before", "after") is None
-
-
-@pytest.mark.asyncio
-async def test_planner_decision_layer_escalates_on_failure():
-    from artemis.agents.planner.planner import _try_decision_layer
-    from artemis.core.decision_client import DecisionResult
-
-    ctx = SimpleNamespace(agent_config=SimpleNamespace(
-        decision=SimpleNamespace(
-            enabled=True, planner_validation=True,
-            url="http://x", model="laya",
-            confidence_threshold=0.85, timeout_seconds=5.0)))
-    with patch(
-        "artemis.core.decision_client.DecisionClient.anoul",
-        return_value=DecisionResult(verdict=None, confidence=0.0),
-    ):
-        assert await _try_decision_layer(ctx, "goal", "before", "after") is None

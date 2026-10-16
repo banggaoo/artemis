@@ -88,7 +88,6 @@ from artemis.agents.operator.prompts import (
     BackgroundTasksPromptComponent,
     render_plan_ledger_bounce,
     ReasoningReminderPromptComponent,
-    ActiveFocusPromptComponent,
     unwritten_action_streak,
     ToolLimitWarningPromptComponent,
     InjectedInstructionPromptComponent,
@@ -256,13 +255,11 @@ class OperatorNode:
                 (FeedbackPromptComponent(), {}),
                 (ReasoningReminderPromptComponent(), {}),
                 (ToolLimitWarningPromptComponent(), {}),
-                (ActiveFocusPromptComponent(), {}),
             ]
         else:
             components = [(c, {}) for c in components] + [
                 (ReasoningReminderPromptComponent(), {}),
                 (ToolLimitWarningPromptComponent(), {}),
-                (ActiveFocusPromptComponent(), {}),
             ]
 
         # Active and finished tasks are now passed as arguments
@@ -429,9 +426,6 @@ class OperatorNode:
             (FeedbackPromptComponent(), {}),
             (ReasoningReminderPromptComponent(), {}),
             (ToolLimitWarningPromptComponent(), {}),
-            # Last block: keeps the live sub-goal + bounce rules inside the
-            # local attention window of sliding-window models.
-            (ActiveFocusPromptComponent(), {}),
         ]
         for component, extra_kwargs in components:
             kwargs_to_pass = {

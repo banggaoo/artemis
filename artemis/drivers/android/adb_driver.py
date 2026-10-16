@@ -382,32 +382,8 @@ class AndroidAdbDriver(BaseDeviceDriver):
             logger.error(f"Press key failed for '{key}': {e}")
             return False
 
-    async def _resolve_launcher_component(self, package_name: str) -> str | None:
-        """Resolve the app's launcher activity to a 'package/Activity' component."""
-        try:
-            out = str(
-                await asyncio.to_thread(
-                    self.device.shell,
-                    f"cmd package resolve-activity --brief {package_name}",
-                )
-            )
-            for line in reversed([l.strip() for l in out.splitlines() if l.strip()]):
-                if "/" in line and line.startswith(package_name):
-                    return line
-        except Exception:
-            pass
-        return None
-
     async def launch_app(self, package_name: str) -> bool:
         try:
-            # `am start -n` lands deterministically; `monkey -p` can silently
-            # drop the event when another app holds transient focus (observed:
-            # three monkey launches of Settings no-oped while the search app
-            # stayed foreground — a direct `am start -n` worked instantly).
-            component = await self._resolve_launcher_component(package_name)
-            if component:
-                await asyncio.to_thread(self.device.shell, f"am start -n {component}")
-                return True
             cmd = f"monkey -p {package_name} -c android.intent.category.LAUNCHER 1"
             await asyncio.to_thread(self.device.shell, cmd)
             return True

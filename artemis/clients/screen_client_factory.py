@@ -147,8 +147,6 @@ class FallbackScreenClient:
         retry_after: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
         state_probe: Callable[[str], str | None] = device_state,
-        offline_grace_seconds: float | None = None,
-        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._device_id = device_id
         self._helper = helper or AccessibilityClient(device_id)
@@ -157,15 +155,6 @@ class FallbackScreenClient:
         self._retry_after = retry_after
         self._clock = clock
         self._state_probe = state_probe
-        if offline_grace_seconds is None:
-            try:
-                offline_grace_seconds = float(
-                    os.environ.get("ARTEMIS_DEVICE_OFFLINE_GRACE_SECONDS", "120")
-                )
-            except ValueError:
-                offline_grace_seconds = 120.0
-        self._offline_grace_seconds = max(0.0, offline_grace_seconds)
-        self._sleep = sleep
         self._helper_down_until: float | None = None
         self._active_backend: str | None = None
         self._last_failure: str | None = None
@@ -215,34 +204,10 @@ class FallbackScreenClient:
                 logger.debug(f"Backend listener failed: {exc}")
 
     def _ensure_device_online(self) -> None:
-        """Fail with the real cause when the phone is gone — after a grace window.
-
-        adb blips, transport rebuilds, and emulator reboots resolve
-        themselves; a queued task should pause, not die, when the device
-        briefly vanishes (observed: an emulator crash mid-batch instantly
-        failed ~90 queued tasks). The window is bounded by
-        ``offline_grace_seconds`` (``ARTEMIS_DEVICE_OFFLINE_GRACE_SECONDS``,
-        default 120s; 0 restores fail-fast).
-        """
+        """Fail fast with the real cause when the phone itself is gone."""
         state = self._state_probe(self._device_id)
-        if state == "device":
-            return
-        if self._offline_grace_seconds > 0:
-            deadline = self._clock() + self._offline_grace_seconds
-            logger.warning(
-                f"Device {self._device_id} is {state or 'not listed'}; waiting "
-                f"up to {self._offline_grace_seconds:g}s for it to return."
-            )
-            while state != "device" and self._clock() < deadline:
-                self._sleep(5.0)
-                state = self._state_probe(self._device_id)
-            if state == "device":
-                logger.warning(
-                    f"Device {self._device_id} returned during the offline "
-                    "grace window; resuming."
-                )
-                return
-        raise DeviceOfflineError(self._device_id, state)
+        if state != "device":
+            raise DeviceOfflineError(self._device_id, state)
 
     def _helper_allowed(self) -> bool:
         if self._helper_down_until is None:
