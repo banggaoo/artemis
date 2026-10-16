@@ -169,7 +169,7 @@ _FINAL_TURN_WARNING = "[WARNING] This is your final turn; only 'report_task_stat
 # emitted; action selection is a fixed-space `choose` over the live
 # element list plus meta-actions instead.
 _HYBRID_PLAN_PROMPT = """You are the planning stage of a UI testing agent.
-GOAL: $goal
+GOAL: {{ goal }}
 
 Given the attached CURRENT screenshot and element list, decompose the goal
 into 3-6 short ordered milestones (one per line, starting with '- '). Each
@@ -182,9 +182,9 @@ If the first target is not visible, the first milestone is how to reach it.
 Output only the milestone list."""
 
 _HYBRID_DESCRIBE_PROMPT = """You are the perception stage of a UI testing agent.
-GOAL: $goal
+GOAL: {{ goal }}
 PLAN:
-$plan
+{{ plan }}
 
 Describe the CURRENT screenshot factually in 3-5 short sentences: which app
 and screen is shown, what has changed since the previous observation, and

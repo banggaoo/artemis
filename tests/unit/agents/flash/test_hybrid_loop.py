@@ -486,3 +486,43 @@ async def test_hybrid_decide_escalates_when_describe_says_target_reached():
 
     assert out is None
     MockClient.return_value.achoose.assert_not_called()
+
+
+# --- hybrid prompt rendering ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_hybrid_plan_prompt_renders_goal():
+    """The plan prompt is rendered with jinja2, so `{{ goal }}` must be
+    substituted — a `$goal` placeholder would reach the VLM literally."""
+    runner = _runner(goal="enable dark theme")
+    complete = AsyncMock(return_value=AIMessage(content="- open Settings"))
+    with patch("artemis.agents.flash.runner.acomplete", new=complete):
+        await runner._hybrid_plan(AsyncMock())
+
+    prompt = complete.call_args.args[1][0].content[0]["text"]
+    assert "GOAL: enable dark theme" in prompt
+    assert "$goal" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_hybrid_describe_prompt_renders_goal_and_plan():
+    """The describe prompt must carry both the goal and the plan text —
+    rendered with jinja2, `$goal`/`$plan` would pass through literally."""
+    runner = _runner(goal="enable dark theme")
+    describe = AIMessage(content="Settings list.\nTARGET: reached")
+    complete = AsyncMock(return_value=describe)
+    with patch("artemis.agents.flash.runner.acomplete", new=complete):
+        await runner._hybrid_decide(
+            AsyncMock(),
+            _state([{"index": 1, "text": "Dark theme"}]),
+            HumanMessage(content="x"),
+            "- open Settings\n- tap Display",
+            _cfg(),
+        )
+
+    prompt = complete.call_args.args[1][0].content
+    assert "GOAL: enable dark theme" in prompt
+    assert "- open Settings\n- tap Display" in prompt
+    assert "$goal" not in prompt
+    assert "$plan" not in prompt
