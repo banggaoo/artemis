@@ -66,6 +66,10 @@ def composite():
     u2 = MagicMock(spec=UIAutomatorClient)
     factory = MagicMock(return_value=u2)
     clock = {"now": 0.0, "state": "device"}
+
+    def _advance(seconds):
+        clock["now"] += seconds
+
     client = FallbackScreenClient(
         "dev",
         helper=helper,
@@ -73,6 +77,8 @@ def composite():
         retry_after=30.0,
         clock=lambda: clock["now"],
         state_probe=lambda _serial: clock["state"],
+        offline_grace_seconds=60.0,
+        sleep=_advance,
     )
     return client, helper, u2, factory, clock
 
@@ -159,6 +165,21 @@ def test_offline_device_fails_fast_without_touching_uiautomator(composite):
     with pytest.raises(DeviceOfflineError, match="does not list it"):
         client.get_screen_data()
     factory.assert_not_called()
+
+
+def test_device_returning_during_grace_window_recovers(composite):
+    """An emulator that comes back inside the grace window must not fail the
+    task — the call is served by the UIAutomator fallback once the state
+    probe reports 'device' again."""
+    client, helper, u2, factory, clock = composite
+    helper.get_screen_data.side_effect = RuntimeError("connection refused")
+    u2.get_screen_data.return_value = "screen-data"
+
+    states = iter(["offline", "offline", "device"])
+    client._state_probe = lambda _serial: next(states, "device")
+
+    assert client.get_screen_data() == "screen-data"
+    assert client.active_backend == "uiautomator"
 
 
 def test_backend_history_and_listeners_track_every_switch(composite):
