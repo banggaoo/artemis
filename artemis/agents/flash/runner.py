@@ -86,6 +86,7 @@ from artemis.agents.flash.state_predicates import (
 )
 from artemis.mcp.action_executor import McpActionExecutor
 from artemis.utils.image_codec import image_data_uri
+from artemis.utils.image_hash import dhash_hex, hamming_distance_hex
 from artemis.mcp.observation import observe
 from artemis.memory.transcript import PRO_UI_LIST_MARKER, TranscriptLedger, mark_ephemeral
 from artemis.services.llm import (
@@ -491,6 +492,12 @@ class FlashRunner:
         the Dark theme switch flipped while the signature stayed identical).
         Volatile attributes (``focused``/``selected``) are excluded: focus
         moves on scroll/hover and would fake 'changed' on dead taps.
+        Inherently volatile elements are excluded entirely — status-bar
+        items (``com.android.systemui``: clock, badges) tick on their own
+        and OCR text jitters between dumps — so a strict set comparison
+        can mean 'unchanged' instead of a similarity ratio that swallows
+        small real changes on dense screens (observed live: one changed
+        digit label on the 30-node dial pad read 'dead' at Jaccard 0.8).
         """
         return frozenset(
             (
@@ -500,6 +507,8 @@ class FlashRunner:
                 el.get("enabled"),
             )
             for el in elements
+            if not el.get("is_ocr")
+            and el.get("package") != "com.android.systemui"
         )
 
     @staticmethod
@@ -1166,7 +1175,7 @@ class FlashRunner:
         verdicts and unmet subgoals for feedback on rejection.
         """
         if self._goal_invariants:
-            elements = await self._fresh_invariant_elements(state)
+            elements = await self._reobserve_elements(state)
             report = evaluate_invariants(self._goal_invariants, elements)
             if report["verdict"] == "unsatisfied":
                 logger.info("Completion rejected: declared invariant unsatisfied.")
@@ -1274,23 +1283,42 @@ class FlashRunner:
             xml_list = obs.elements_text
         return screenshot_bytes or img_bytes, xml_list
 
-    async def _fresh_invariant_elements(self, state: State | None) -> list:
-        """Re-observes the screen before evaluating declared goal invariants.
+    @staticmethod
+    def _screens_differ(before: bytes | None, after: bytes | None) -> bool:
+        """Pixel-level 'did the screen change' oracle for stale-tree detection.
 
-        Post-action captures race UI transitions — a theme toggle applies
-        after the ~0.4 s capture delay, so ``state.indexed_elements`` can
-        hold the pre-action state for the whole next turn (observed live:
-        four allowed taps ping-ponged the dark-theme switch because every
-        pre-action check read the lagged ``checked``). Invariant decisions
-        — suppress an action, release a completion — need the settled
-        truth, and a fresh dump is cheap next to the model call that just
-        ran. Falls back to the last captured elements on failure.
+        A 16x16 dHash comparison: deterministic screencap encoding means a
+        same-screen pair scores 0 bits, while even a single appended digit
+        scored ~9 bits on the emulator (measured) — a threshold of 3 keeps
+        real small changes while staying far above capture noise.
+        """
+        if not before or not after:
+            return False
+        dist = hamming_distance_hex(
+            dhash_hex(before, hash_size=16), dhash_hex(after, hash_size=16)
+        )
+        return dist is not None and dist >= 3
+
+    async def _reobserve_elements(self, state: State | None) -> list:
+        """Re-observes the screen when a decision needs the settled truth.
+
+        Post-action captures race UI updates — a theme toggle applies
+        after the ~0.4 s capture delay, and the accessibility helper's
+        event-driven tree can trail a text commit too — so
+        ``state.indexed_elements`` can hold the pre-action state for a
+        whole turn (observed live: four allowed taps ping-ponged the
+        dark-theme switch on lagged ``checked``; a working dial-pad tap
+        read 'dead' on a lagged dump). Verification decisions — suppress
+        an action, release a completion, call a tap dead — need the
+        settled state, and a fresh dump is cheap next to the model call
+        that just ran. Falls back to the last captured elements on
+        failure.
         """
         elements = getattr(state, "indexed_elements", None) or []
         try:
             obs, _ = await observe(self.ctx, self.controller)
         except Exception as obs_err:
-            logger.warning(f"Invariant re-observation failed: {obs_err}")
+            logger.warning(f"Re-observation failed: {obs_err}")
             return elements
         if obs.ok and obs.hierarchy_ok:
             elements = obs.elements
@@ -2028,6 +2056,7 @@ class FlashRunner:
             # itself, leaving the VLM to toggle the switch blind forever).
             elements_now = getattr(state, "indexed_elements", None) or []
             pre_sig = self._element_signature(elements_now)
+            turn_pre_image = current_pre_screenshot_bytes
             label_by_idx = {
                 el.get("index"): self._element_label(el)
                 for el in elements_now
@@ -2069,9 +2098,20 @@ class FlashRunner:
                 inv_elements = (
                     elements_now
                     if has_report_call
-                    else await self._fresh_invariant_elements(state)
+                    else await self._reobserve_elements(state)
                 )
                 inv_report = evaluate_invariants(self._goal_invariants, inv_elements)
+                if inv_report["verdict"] == "unsatisfied" and not has_report_call:
+                    # Evidence-first feedback: the model narrates its own plan
+                    # ("I dialed 55501") and can drift from the field's real
+                    # contents. The invariant already measured live state —
+                    # put the observed-vs-expected values where they cannot
+                    # be missed, before the next action proposal.
+                    pending_notices.append(
+                        "[GOAL CHECK] Declared conditions are not yet met on"
+                        " the live screen — act on these observed values, not"
+                        " on your plan:\n" + describe_failures(inv_report)
+                    )
                 if inv_report["verdict"] == "satisfied" and not has_report_call:
                     satisfied_suppression_streak += 1
                     logger.info(
@@ -2212,13 +2252,41 @@ class FlashRunner:
                 native_text=native_text,
             )
 
-            # Did anything actually change? Mask dead taps, count repeats of
-            # already-dead keys, and flag a verbatim re-issue of last turn's
-            # call set (the VLM re-clicking the same coordinates counts too).
+            # Did anything actually change? Strict set equality — volatile
+            # sources are filtered inside the signature, so a single real
+            # difference (one digit appended, one switch flipped) counts as
+            # changed even on a dense screen. Mask dead taps, count repeats
+            # of already-dead keys, and flag a verbatim re-issue of last
+            # turn's call set.
             post_sig = self._element_signature(
                 getattr(state, "indexed_elements", None) or []
             )
-            unchanged = self._signatures_similar(pre_sig, post_sig)
+            unchanged = pre_sig == post_sig
+            if unchanged and turn.actions:
+                # Two stale-evidence guards before a 'dead' verdict. The
+                # a11y tree can freeze while the screen still moves —
+                # observed live: a frozen helper tree served identical XML
+                # across a whole dial-pad run while digits accumulated.
+                # Pixels come through a different capture path, so a
+                # changed screenshot disproves 'dead' even when the tree
+                # lies. Failing that, the post-action dump may just lag a
+                # settling UI — re-observe once; a real dead tap stays
+                # dead on the second look.
+                if self._screens_differ(turn_pre_image, current_pre_screenshot_bytes):
+                    unchanged = False
+                    logger.info(
+                        "Post-action screenshot changed while the element"
+                        " tree did not — stale hierarchy, not a dead turn."
+                    )
+                else:
+                    fresh = await self._reobserve_elements(state)
+                    post_sig = self._element_signature(fresh)
+                    unchanged = pre_sig == post_sig
+                    if not unchanged:
+                        logger.info(
+                            "Re-observation resolved an ambiguous dead read:"
+                            " the screen did change after all."
+                        )
             repeat_keys: list[str] = []
             for key in turn_keys:
                 if key.startswith("tap_"):

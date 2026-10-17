@@ -430,7 +430,7 @@ def format_minimal_list_with_elements(
             # Raw uiautomator state attributes, carried for code-side
             # verification (signatures, state predicates). They are NOT
             # rendered into the compact text — see issue #187 for that.
-            for state_attr in ("checked", "enabled", "selected"):
+            for state_attr in ("checked", "enabled", "selected", "package"):
                 if node.get(state_attr) is not None:
                     element[state_attr] = node.get(state_attr)
             if not text.strip():

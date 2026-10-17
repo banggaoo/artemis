@@ -42,7 +42,7 @@ __all__ = ["observe"]
 
 
 _CONTROL_CLASSES = ("switch", "checkbox", "radiobutton", "togglebutton")
-_STATE_ATTRS = ("checked", "enabled", "selected", "clickable", "scrollable")
+_STATE_ATTRS = ("checked", "enabled", "selected", "clickable", "scrollable", "package")
 
 
 def _control_only_elements(fused_xml: list[dict], elements: list[dict]) -> list[dict]:

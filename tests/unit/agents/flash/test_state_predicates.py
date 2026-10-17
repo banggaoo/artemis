@@ -89,6 +89,61 @@ def test_predicate_unknown_when_attribute_missing():
     assert r["reason"] == "attribute_not_known"
 
 
+# --- text attribute ------------------------------------------------------------
+
+_DIGITS = {
+    "index": 3,
+    "text": "555-0155",
+    "class": "android.widget.EditText",
+    "resource_id": "com.google.android.dialer:id/digits",
+    "bounds": [147, 1196, 933, 1340],
+    "center": [540, 1268],
+    "enabled": "true",
+    "is_ocr": False,
+}
+
+_PRED_DIGITS = {
+    "id": "dialed_5550155",
+    "selector": {
+        "resource_id": "com.google.android.dialer:id/digits",
+        "class": "android.widget.EditText",
+    },
+    "attribute": "text",
+    "expected": "555-0155",
+}
+
+
+def test_text_predicate_satisfied_on_exact_match():
+    r = evaluate_predicate(_PRED_DIGITS, [_DIGITS])
+    assert r["status"] == "satisfied"
+    assert r["evidence"]["observed"] == "555-0155"
+
+
+def test_text_predicate_unsatisfied_on_partial_input():
+    r = evaluate_predicate(_PRED_DIGITS, [{**_DIGITS, "text": "555-0"}])
+    assert r["status"] == "unsatisfied"
+
+
+def test_text_predicate_unknown_when_text_absent():
+    r = evaluate_predicate(_PRED_DIGITS, [{k: v for k, v in _DIGITS.items() if k != "text"}])
+    assert r["status"] == "unknown"
+    assert r["reason"] == "attribute_not_known"
+
+
+def test_text_predicate_rejects_bool_expected():
+    bad = {**_PRED_DIGITS, "expected": True}
+    r = evaluate_predicate(bad, [_DIGITS])
+    assert r["status"] == "unknown"
+    assert r["reason"] == "unsupported_predicate"
+
+
+def test_bool_predicate_rejects_string_expected():
+    bad = {**_PRED_OFF, "expected": "false"}
+    r = evaluate_predicate(bad, [_SWITCH])
+    assert r["status"] == "unknown"
+    assert r["reason"] == "unsupported_predicate"
+
+
 def test_predicate_ignores_ocr_elements():
     ocr = {**_SWITCH, "is_ocr": True, "checked": "false"}
     r = evaluate_predicate(_PRED_OFF, [ocr])
@@ -139,6 +194,40 @@ def test_describe_failures_names_expected_and_observed():
 
 
 # --- element signature sees state ----------------------------------------------
+
+
+def _sig(elements):
+    from artemis.agents.flash.runner import FlashRunner
+
+    return FlashRunner._element_signature(elements)
+
+
+def test_signature_dense_screen_small_change_counts():
+    # 30-node dial pad: appending one digit changes exactly one label —
+    # Jaccard 0.8 called this 'unchanged'; strict equality must not.
+    pad = [
+        {"index": i, "text": str(i % 10), "center": [100 * (i % 3) + 50, 1400 + 190 * (i // 3)], "package": "com.google.android.dialer"}
+        for i in range(29)
+    ]
+    pad.append({**_DIGITS, "package": "com.google.android.dialer"})
+    before = _sig(pad)
+    after = _sig([*pad[:-1], {**_DIGITS, "text": "555-015", "package": "com.google.android.dialer"}])
+    assert before != after
+
+
+def test_signature_excludes_status_bar_and_ocr_jitter():
+    app = [{"index": 1, "text": "five", "center": [540, 1649], "package": "com.google.android.dialer"}]
+    noise_a = [
+        *app,
+        {"index": 2, "text": "19:08", "center": [60, 40], "package": "com.android.systemui"},
+        {"index": 3, "text": "OCR read A", "center": [500, 200], "is_ocr": True},
+    ]
+    noise_b = [
+        *app,
+        {"index": 2, "text": "19:09", "center": [60, 40], "package": "com.android.systemui"},
+        {"index": 3, "text": "OCR read B", "center": [500, 200], "is_ocr": True},
+    ]
+    assert _sig(noise_a) == _sig(noise_b)
 
 
 def test_signature_distinguishes_toggle_states():
@@ -267,3 +356,75 @@ async def test_verify_completion_falls_through_on_unknown():
     state = SimpleNamespace(indexed_elements=[])
     allowed, _ = await r._verify_completion(state)
     assert allowed
+
+
+# --- pixel-level stale-tree oracle --------------------------------------------
+
+
+def _png_bytes(width=64, height=64, box=None):
+    import io
+
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (width, height), "black")
+    if box:
+        ImageDraw.Draw(img).rectangle(box, fill="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_screens_differ_flags_a_small_real_change():
+    from artemis.agents.flash.runner import FlashRunner
+
+    before = _png_bytes()
+    after = _png_bytes(box=(10, 10, 24, 24))  # one appended digit's worth
+    assert FlashRunner._screens_differ(before, after)
+
+
+def test_screens_differ_stays_quiet_on_identical_frames():
+    from artemis.agents.flash.runner import FlashRunner
+
+    a = _png_bytes(box=(5, 5, 30, 30))
+    b = _png_bytes(box=(5, 5, 30, 30))
+    assert not FlashRunner._screens_differ(a, b)
+
+
+def test_screens_differ_refuses_missing_or_garbage_bytes():
+    from artemis.agents.flash.runner import FlashRunner
+
+    assert not FlashRunner._screens_differ(None, b"x")
+    assert not FlashRunner._screens_differ(b"x", None)
+    assert not FlashRunner._screens_differ(b"not a png", b"also not")
+
+
+def test_describe_failures_locates_the_digit_divergence():
+    """A text invariant on a formatted field: the finding names the shared
+    digit prefix and both remainders — '(555) 001-0555' vs '555-0155' shares
+    '5550' then diverges."""
+    from artemis.agents.flash.state_predicates import describe_failures, evaluate_invariants
+
+    pred = {
+        "id": "dialed",
+        "selector": {"resource_id": "com.google.android.dialer:id/digits"},
+        "attribute": "text",
+        "expected": "555-0155",
+    }
+    el = {
+        "index": 1, "text": "(555) 001-0555",
+        "resource_id": "com.google.android.dialer:id/digits",
+        "class": "android.widget.EditText", "is_ocr": False,
+    }
+    report = evaluate_invariants([pred], [el])
+    text = describe_failures(report)
+    assert "digits 1-4 '5550' match" in text
+    assert "expected continues '155'" in text
+    assert "observed continues '010555'" in text
+
+
+def test_digit_prefix_diff_handles_formatting_noise():
+    from artemis.agents.flash.state_predicates import _digit_prefix_diff
+
+    assert "digits 1-4" in _digit_prefix_diff("555-0155", "(555) 001-0555")
+    assert _digit_prefix_diff("555-0155", "555-0155") is None
+    assert _digit_prefix_diff("", "123") is None

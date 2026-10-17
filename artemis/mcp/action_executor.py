@@ -33,6 +33,7 @@ through ``ToolFailure`` or an explicit status.
 import ast
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -177,6 +178,11 @@ class McpActionExecutor:
                 wire_name, wire_args, finalize, target_semantics = self._translate(
                     raw_name, args, state, index_elements=index_elements
                 )
+                desc_note = self._description_mismatch_note(
+                    args,
+                    target_semantics,
+                    self._index_elements(state, index_elements),
+                )
                 if raw_name in _POINT_TARGET_ACTIONS:
                     # The normalized point the action was sent to: the recorded
                     # coordinates of an index target (the model named an index,
@@ -184,7 +190,18 @@ class McpActionExecutor:
                     target_coordinates = wire_args.get("target")
                 extension = raw_name not in (REQUIRED_ACTIONS | OPTIONAL_ACTIONS)
 
-                if extension:
+                if desc_note and desc_note.get("suggestion"):
+                    # Deterministic guard: the model's own description says it
+                    # wants a different element than the index resolves to, and
+                    # a listed element confidently matches the description. On
+                    # a dense pad the wrong tap still corrupts state (observed:
+                    # '1 key' narrated over the 5-key's JKL cell kept appending
+                    # 5s), so refuse the tap and hand back the right index.
+                    message = desc_note["text"]
+                    res = ActionResult.failure(
+                        raw_name, message, code=ActionCode.INVALID_ARGS
+                    )
+                elif extension:
                     raw_result = await session.call_raw(wire_name, wire_args)
                     message = next(
                         (b.text for b in raw_result.content if getattr(b, "type", "") == "text"),
@@ -194,6 +211,8 @@ class McpActionExecutor:
                 else:
                     res = await session.call(wire_name, wire_args)
                     message = finalize(res) if finalize else res.message
+                    if res.ok and desc_note:
+                        message = f"{message}\n{desc_note['text']}"
 
                 if res.ok or self._observe_despite_failure(raw_name, res):
                     obs = await session.observe(settle_ms=400)
@@ -481,6 +500,95 @@ class McpActionExecutor:
             "target_class": element.get("class"),
         }
         return [_norm_x(center[0]), _norm_y(center[1])], recorded
+
+    _DESC_STOPWORDS = frozenset(
+        {
+            "key", "button", "the", "a", "an", "icon", "field", "box", "switch",
+            "option", "item", "label", "element", "text", "tap", "click", "on",
+            "to", "of", "in", "and", "or",
+        }
+    )
+
+    # Spelled-out digits describe the same glyph as the numeral — "the five key"
+    # *is* the '5' cell on a dial pad, not a mismatch.
+    _DESC_DIGIT_WORDS = {
+        "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+        "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+    }
+
+    @classmethod
+    def _description_mismatch_note(
+        cls,
+        args: dict[str, Any],
+        semantics: dict[str, Any],
+        elements: list[dict[str, Any]] | None = None,
+    ) -> str | None:
+        """Warns when a stated target_description disagrees with the resolved element.
+
+        Index targets resolve to an observed element whose text is of record;
+        ``target_description`` rides along unverified (Pro parity — it is only
+        *required* for coordinate targets). On dense lookalike screens the model
+        can narrate the wrong index ('1 key' while the index is the JKL cell of
+        the 5-key): the tap still executes, but the note names the real target
+        so the next turn can correct instead of trusting its own description.
+        When the element list is available it also names the index that does
+        match the description — on a 50-line pad a small model cannot reliably
+        rescan the list to find it.
+        """
+        description = args.get("target_description")
+        text = semantics.get("target_text")
+        if not (isinstance(description, str) and description.strip()) or not text:
+            return None
+        tokens = {
+            cls._DESC_DIGIT_WORDS.get(t, t)
+            for t in re.findall(r"[a-z0-9]+", description.lower())
+            if t not in cls._DESC_STOPWORDS
+        }
+        if not tokens or any(t in text.lower() for t in tokens):
+            return None
+        rid = semantics.get("target_resource_id")
+        where = f" ({rid})" if rid else ""
+        note = (
+            f"[NOTE] That index resolves to '{text}'{where}, which does not match"
+            f" the described target '{description}'."
+        )
+        suggestion = cls._matching_element_hint(tokens, elements)
+        if suggestion:
+            note += f" The element matching '{description}' is {suggestion}."
+        else:
+            note += " Re-check the current element list if you meant a different element."
+        return {"text": note, "suggestion": suggestion}
+
+    @staticmethod
+    def _matching_element_hint(
+        tokens: set[str], elements: list[dict[str, Any]] | None
+    ) -> str | None:
+        """Names the listed element(s) whose text matches the described tokens.
+
+        Exact-text equality ranks first ('1' is the 1-key's digit cell, not a
+        substring of '(555) 015-5'); longer tokens may substring-match so
+        'the dark theme switch' finds the 'Dark theme' row. At most two
+        candidates are named — a longer list would become the same wall of
+        lookalikes the model just failed to read.
+        """
+        if not elements or not tokens:
+            return None
+        exact: list[str] = []
+        partial: list[str] = []
+        for pos, el in enumerate(elements):
+            label = str(el.get("text") or "").strip()
+            if not label:
+                continue
+            idx = el.get("index", pos + 1)
+            lower = label.lower()
+            if any(t == lower for t in tokens):
+                exact.append(f"[{idx}] '{label}'")
+            elif any(len(t) > 1 and t in lower for t in tokens):
+                partial.append(f"[{idx}] '{label}'")
+        candidates = exact or partial
+        if not candidates:
+            return None
+        return " or ".join(candidates[:2])
 
     @staticmethod
     def _require_description(args: dict[str, Any], label: str) -> dict[str, Any]:

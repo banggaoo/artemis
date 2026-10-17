@@ -38,14 +38,19 @@ Predicate schema::
         "attribute": "checked",
         "expected": False,
     }
+
+Boolean attributes (``checked``/``enabled``/``selected``) take boolean
+``expected`` values; ``text`` takes a string and compares exact equality.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 _SELECTOR_KEYS = {"resource_id", "class", "text"}
-_STATE_ATTRIBUTES = {"checked", "enabled", "selected"}
+_BOOL_ATTRIBUTES = {"checked", "enabled", "selected"}
+_STATE_ATTRIBUTES = _BOOL_ATTRIBUTES | {"text"}
 
 
 def _as_bool(value: Any) -> bool | None:
@@ -76,7 +81,8 @@ def evaluate_predicate(predicate: dict[str, Any], elements: list[dict[str, Any]]
         or not set(selector) <= _SELECTOR_KEYS
         or any(not isinstance(v, str) or not v.strip() for v in selector.values())
         or attribute not in _STATE_ATTRIBUTES
-        or type(expected) is not bool
+        or (attribute in _BOOL_ATTRIBUTES and type(expected) is not bool)
+        or (attribute == "text" and not isinstance(expected, str))
     ):
         return {
             "status": "unknown",
@@ -104,7 +110,11 @@ def evaluate_predicate(predicate: dict[str, Any], elements: list[dict[str, Any]]
         }
 
     target = matches[0]
-    observed = _as_bool(target.get(attribute))
+    observed = (
+        _as_bool(target.get(attribute))
+        if attribute in _BOOL_ATTRIBUTES
+        else target.get(attribute)
+    )
     evidence.update(
         attribute=attribute,
         observed=observed,
@@ -150,6 +160,32 @@ def evaluate_invariants(
     return {"verdict": verdict, "results": results}
 
 
+def _digit_prefix_diff(expected: str, observed: str) -> str | None:
+    """Locates the first differing digit between an expected and observed value.
+
+    Text-equality predicates on formatted fields (a dial pad renders '555-0155',
+    then '(555) 015-5' once a formatter kicks in) need digit-level comparison —
+    raw prefix comparison would report a false mismatch at the first '(' or
+    '-'. Returns a short clause describing the common digit prefix and both
+    remainders, or None when digit counts/content can't be compared usefully.
+    """
+    exp = re.sub(r"\D", "", expected)
+    obs = re.sub(r"\D", "", observed)
+    if not exp or not obs:
+        return None
+    shared = 0
+    for a, b in zip(exp, obs):
+        if a != b:
+            break
+        shared += 1
+    if shared == len(exp) == len(obs):
+        return None
+    return (
+        f" digits 1-{shared} '{exp[:shared] or '(none)'}' match;"
+        f" expected continues '{exp[shared:]}', observed continues '{obs[shared:]}'"
+    )
+
+
 def describe_failures(report: dict[str, Any]) -> str:
     """One-line-per-predicate findings for feedback into the model turn."""
     lines = []
@@ -158,9 +194,13 @@ def describe_failures(report: dict[str, Any]) -> str:
             continue
         ev = r.get("evidence", {})
         target = ev.get("target") or {}
+        detail = ""
+        if ev.get("attribute") == "text":
+            diff = _digit_prefix_diff(str(ev.get("expected")), str(ev.get("observed")))
+            detail = f" —{diff}" if diff else ""
         lines.append(
             f"[invariant failed] '{r.get('predicate_id') or target.get('text')}'"
             f" expected {ev.get('attribute')}={ev.get('expected')}"
-            f" but observed {ev.get('observed')}"
+            f" but observed {ev.get('observed')}{detail}"
         )
     return "\n".join(lines) or "Declared goal condition is not satisfied."

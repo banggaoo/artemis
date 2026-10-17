@@ -35,6 +35,7 @@ def _make_executor(width=1080, height=2400):
     ctx.device.device_height = height
     actuator = Mock()
     actuator.controller = Mock()
+    actuator.extensions.return_value = []
     return McpActionExecutor(ctx, actuator=actuator)
 
 
@@ -347,3 +348,237 @@ def test_click_sequence_accepts_a_serialized_pair_list():
         _state(),
     )
     assert wire_args["sequence"] == [[500, 600], [10, 10]]
+
+
+# --- Resolved-target feedback: the description↔element disagreement note ---
+
+
+def _dialer_state():
+    """Three entries for one dial-pad key: the parent frame, the digit child and
+    the letter child all land on the same physical key."""
+    state = _state()
+    state.indexed_elements = [
+        {
+            "index": 1,
+            "center": [180, 1400],
+            "text": "5,JKL",
+            "bounds": [40, 1300, 320, 1500],
+            "class": "android.widget.FrameLayout",
+            "resource_id": "com.google.android.dialer:id/five",
+            "is_ocr": False,
+        },
+        {
+            "index": 2,
+            "center": [180, 1360],
+            "text": "5",
+            "bounds": [150, 1320, 210, 1400],
+            "class": "android.widget.TextView",
+            "resource_id": "com.google.android.dialer:id/five_digit",
+            "is_ocr": False,
+        },
+        {
+            "index": 3,
+            "center": [180, 1440],
+            "text": "JKL",
+            "bounds": [150, 1400, 210, 1480],
+            "class": "android.widget.TextView",
+            "resource_id": "com.google.android.dialer:id/five_letters",
+            "is_ocr": False,
+        },
+    ]
+    state.indexed_points = [el["center"] for el in state.indexed_elements]
+    return state
+
+
+def test_mismatch_note_fires_when_the_description_names_another_key():
+    """The observed failure on dense keypads: 'the 1 key' narrated while the
+    index actually resolves to the JKL letter cell of the 5 key."""
+    executor = _make_executor()
+    _, _, _, semantics = executor._translate(
+        "click", {"target": 3, "target_description": "the 1 key"}, _dialer_state()
+    )
+    note = executor._description_mismatch_note(
+        {"target_description": "the 1 key"}, semantics
+    )
+    assert note is not None
+    assert "'JKL'" in note["text"]
+    assert "five_letters" in note["text"]
+
+
+def test_mismatch_note_names_the_index_the_description_meant():
+    """'1 key' mis-resolved onto 'JKL': the element list carries a '1' digit
+    cell — the note must point at it, not just flag the error."""
+    executor = _make_executor()
+    state = _dialer_state()
+    state.indexed_elements = [
+        *state.indexed_elements,
+        {
+            "index": 4,
+            "center": [180, 960],
+            "text": "1",
+            "bounds": [150, 920, 210, 1000],
+            "class": "android.widget.TextView",
+            "resource_id": "com.google.android.dialer:id/dialpad_key_number",
+            "is_ocr": False,
+        },
+    ]
+    _, _, _, semantics = executor._translate(
+        "click", {"target": 3, "target_description": "the 1 key"}, state
+    )
+    note = executor._description_mismatch_note(
+        {"target_description": "the 1 key"}, semantics, state.indexed_elements
+    )
+    assert note["suggestion"] == "[4] '1'"
+
+
+def test_mismatch_hint_does_not_substring_match_single_digits_into_values():
+    """'0 key' must not 'match' the digits field showing '(555) 004' — a
+    single-character token requires exact text equality."""
+    executor = _make_executor()
+    elements = [
+        {
+            "index": 1,
+            "center": [540, 400],
+            "text": "(555) 004",
+            "bounds": [40, 350, 1040, 450],
+            "class": "android.widget.EditText",
+            "resource_id": "com.google.android.dialer:id/digits",
+            "is_ocr": False,
+        },
+        {
+            "index": 2,
+            "center": [540, 1900],
+            "text": "0",
+            "bounds": [500, 1850, 580, 1950],
+            "class": "android.widget.TextView",
+            "resource_id": "com.google.android.dialer:id/dialpad_key_number",
+            "is_ocr": False,
+        },
+    ]
+    hint = executor._matching_element_hint({"0"}, elements)
+    assert hint == "[2] '0'"
+
+
+def test_mismatch_hint_returns_none_without_the_element_list():
+    executor = _make_executor()
+    assert executor._matching_element_hint({"5"}, None) is None
+    assert executor._matching_element_hint(set(), [{"text": "5"}]) is None
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "the JKL cell",       # letter token matches the resolved text
+        None,                 # absent — the field is optional on index targets
+        "",                   # blank
+    ],
+)
+def test_mismatch_note_stays_quiet_when_the_description_agrees_or_is_absent(description):
+    executor = _make_executor()
+    _, _, _, semantics = executor._translate(
+        "click",
+        {"target": 3, **({"target_description": description} if description else {})},
+        _dialer_state(),
+    )
+    note = executor._description_mismatch_note(
+        {"target_description": description}, semantics
+    )
+    assert note is None
+
+
+def test_mismatch_note_stays_quiet_for_the_element_the_description_names():
+    """'the 5 key' against the digit child '5' — description and resolved
+    element agree, no note."""
+    executor = _make_executor()
+    _, _, _, semantics = executor._translate(
+        "click", {"target": 2, "target_description": "the 5 key"}, _dialer_state()
+    )
+    assert executor._description_mismatch_note(
+        {"target_description": "the 5 key"}, semantics
+    ) is None
+
+
+@pytest.mark.parametrize("description", ["the 1 key", "the five key"])
+def test_mismatch_note_fires_on_digit_and_spelled_digit_disagreement(description):
+    """Both the numeral and its spelled-out form are checked against the real
+    element text — 'five' naming the JKL cell is still a disagreement."""
+    executor = _make_executor()
+    _, _, _, semantics = executor._translate(
+        "click", {"target": 3}, _dialer_state()
+    )
+    note = executor._description_mismatch_note(
+        {"target_description": description}, semantics
+    )
+    assert note is not None
+    assert "'JKL'" in note["text"]
+
+
+def test_mismatch_note_never_fires_for_coordinate_targets():
+    """A coordinate target's semantics carry only the model's own description —
+    there is nothing observed to disagree with."""
+    executor = _make_executor()
+    _, _, _, semantics = executor._translate(
+        "click",
+        {"target": [500, 600], "target_description": "1 key"},
+        _state(),
+    )
+    note = executor._description_mismatch_note(
+        {"target_description": "1 key"}, semantics
+    )
+    assert note is None
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_the_tap_when_a_confident_alternative_exists():
+    """'1 key' narrated over an index resolving to 'JKL' while a '1' element is
+    listed: the tap must not reach the device — the result refuses it and names
+    the right index (a wrong tap on a dense pad corrupts the digits field)."""
+    from unittest.mock import AsyncMock, patch
+
+    executor = _make_executor()
+    state = _dialer_state()
+    state.indexed_elements.append(
+        {
+            "index": 4,
+            "center": [180, 960],
+            "text": "1",
+            "bounds": [150, 920, 210, 1000],
+            "class": "android.widget.TextView",
+            "resource_id": "com.google.android.dialer:id/dialpad_key_number",
+            "is_ocr": False,
+        }
+    )
+    state.indexed_points.append([180, 960])
+    state.latest_screenshot = None
+    session = AsyncMock()
+    with patch.object(executor, "_session_or_start", return_value=session):
+        result = await executor.execute(
+            "click", {"target": 3, "target_description": "the 1 key"}, "tc", state
+        )
+    session.call.assert_not_called()
+    assert result.status == "error"
+    assert "resolves to 'JKL'" in result.text_summary
+    assert "[4] '1'" in result.text_summary
+
+
+@pytest.mark.asyncio
+async def test_execute_still_taps_when_the_mismatch_has_no_alternative():
+    """A loose description that matches nothing can't prove the index wrong —
+    the tap proceeds (with the note appended on success)."""
+    from unittest.mock import AsyncMock, Mock, patch
+
+    executor = _make_executor()
+    state = _dialer_state()
+    state.latest_screenshot = None
+    session = AsyncMock()
+    res = Mock(ok=True, message="Tapped.", code=Mock(value="OK"), normalized_coordinates=None)
+    session.call = AsyncMock(return_value=res)
+    obs = Mock(ok=True, screenshot_path=None, elements_text="L", hierarchy_ok=False, elements=[])
+    session.observe = AsyncMock(return_value=obs)
+    with patch.object(executor, "_session_or_start", return_value=session):
+        result = await executor.execute(
+            "click", {"target": 3, "target_description": "the green button"}, "tc", state
+        )
+    session.call.assert_called_once()
+    assert result.status == "success"
+    assert "resolves to 'JKL'" in result.text_summary
