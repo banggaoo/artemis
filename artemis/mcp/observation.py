@@ -29,12 +29,67 @@ from artemis.context import ArtemisContext
 from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.mcp.action_types import ActionCode, ObserveResult
 from artemis.utils.ocr_xml_fusion import fuse_ocr_with_xml
-from artemis.utils.visualization import format_minimal_list_with_elements
+from artemis.utils.visualization import (
+    format_minimal_list_with_elements,
+    get_center_coordinates,
+    parse_bounds,
+)
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 __all__ = ["observe"]
+
+
+_CONTROL_CLASSES = ("switch", "checkbox", "radiobutton", "togglebutton")
+_STATE_ATTRS = ("checked", "enabled", "selected", "clickable", "scrollable")
+
+
+def _control_only_elements(fused_xml: list[dict], elements: list[dict]) -> list[dict]:
+    """Metadata for stateful controls the compact list never renders.
+
+    Checkable/toggle nodes carry verified device state but usually no text,
+    so ``format_minimal_list_with_elements`` skips them — a bare Settings
+    switch is invisible to code consumers as well as to the model. Appended
+    AFTER the labeled sequence: their ``index`` values continue the
+    sequence so positional index resolution for listed elements is
+    unchanged, while signatures and goal invariants can see the state.
+    No text line is produced — the model-facing list is unchanged.
+    """
+    seen = {
+        (el.get("resource_id"), el.get("class"), tuple(el.get("bounds") or ())) for el in elements
+    }
+    controls: list[dict] = []
+    index = len(elements) + 1
+    for node in fused_xml:
+        if node.get("ocr_elements"):
+            continue
+        cls = str(node.get("class") or "")
+        if not (node.get("checkable") == "true" or cls.lower().endswith(_CONTROL_CLASSES)):
+            continue
+        bounds = parse_bounds(node.get("bounds"))
+        key = (node.get("resource-id"), node.get("class"), bounds)
+        if not bounds or key in seen:
+            continue
+        seen.add(key)
+        left, top, right, bottom = bounds
+        cx, cy = get_center_coordinates(left, top, right, bottom)
+        element = {
+            "index": index,
+            "center": [cx, cy],
+            "text": str(node.get("text") or node.get("content-desc") or "").strip(),
+            "bounds": [left, top, right, bottom],
+            "class": node.get("class"),
+            "resource_id": node.get("resource-id"),
+            "is_ocr": False,
+            "is_control_only": True,
+        }
+        for attr in _STATE_ATTRS:
+            if node.get(attr) is not None:
+                element[attr] = node.get(attr)
+        controls.append(element)
+        index += 1
+    return controls
 
 
 async def observe(
@@ -89,6 +144,7 @@ async def observe(
 
         fused_xml = fuse_ocr_with_xml(xml_hierarchy, ocr_results)
         minimal_list_str, elements, _ = format_minimal_list_with_elements(fused_xml, width, height)
+        elements = elements + _control_only_elements(fused_xml, elements)
     except Exception as e:
         logger.error(f"Failed to fetch or fuse UI hierarchy: {e}")
         minimal_list_str = "Not available due to hierarchy error."

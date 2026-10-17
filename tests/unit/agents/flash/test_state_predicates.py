@@ -28,6 +28,7 @@ from artemis.agents.flash.state_predicates import (
     evaluate_invariants,
     evaluate_predicate,
 )
+from artemis.mcp.observation import _control_only_elements
 
 _SWITCH = {
     "index": 14,
@@ -156,6 +157,74 @@ def test_signature_ignores_volatile_focus():
         FlashRunner._element_signature(a),
         FlashRunner._element_signature(b),
     )
+
+
+# --- control-only elements (unlabeled switches etc.) ----------------------------
+
+# Raw fused nodes use the uiautomator shape (hyphenated keys, string attrs).
+_RAW_SWITCH = {
+    "text": "",
+    "resource-id": "com.android.settings:id/switchWidget",
+    "class": "android.widget.Switch",
+    "checkable": "true",
+    "checked": "false",
+    "enabled": "true",
+    "clickable": "true",
+    "bounds": "[901,1661][1038,1787]",
+}
+_RAW_TITLE = {
+    "text": "Dark theme",
+    "resource-id": "android:id/title",
+    "class": "android.widget.TextView",
+    "checkable": "false",
+    "checked": "false",
+    "bounds": "[63,1663][333,1734]",
+}
+
+
+def test_control_elements_expose_unlabeled_switch_state():
+    labeled = [
+        {
+            "index": 1,
+            "text": "Dark theme",
+            "class": "android.widget.TextView",
+            "resource_id": "android:id/title",
+            "bounds": [63, 1663, 333, 1734],
+            "is_ocr": False,
+        }
+    ]
+    controls = _control_only_elements([_RAW_TITLE, _RAW_SWITCH], labeled)
+    assert len(controls) == 1
+    el = controls[0]
+    assert el["is_control_only"] and not el["is_ocr"]
+    assert el["index"] == len(labeled) + 1  # appended after the labeled sequence
+    assert el["checked"] == "false"
+    # The predicate now sees the bare switch the compact list never showed
+    # (unlabeled controls match on resource_id + class — there is no text).
+    bare_switch_pred = {
+        **_PRED_OFF,
+        "selector": {
+            "resource_id": "com.android.settings:id/switchWidget",
+            "class": "android.widget.Switch",
+        },
+    }
+    r = evaluate_predicate(bare_switch_pred, labeled + controls)
+    assert r["status"] == "satisfied"
+
+
+def test_control_elements_skip_textviews_and_duplicates():
+    labeled = [
+        {
+            "index": 1,
+            "text": "x",
+            "class": "android.widget.Switch",
+            "resource_id": "com.android.settings:id/switchWidget",
+            "bounds": [901, 1661, 1038, 1787],
+            "is_ocr": False,
+        }
+    ]
+    controls = _control_only_elements([_RAW_TITLE, _RAW_SWITCH], labeled)
+    assert controls == []  # title isn't stateful; switch already represented
 
 
 # --- completion gate ------------------------------------------------------------
