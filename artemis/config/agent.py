@@ -832,6 +832,18 @@ class FlashProfileConfig(BaseModel):
         default_factory=StepSummarizerConfig,
         description="Asynchronous visual context compressor settings.",
     )
+    goal_invariants: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "Declarative success conditions for the Flash loop, evaluated by"
+            " artemis.agents.flash.state_predicates against live element state"
+            " (e.g. {id, selector: {resource_id, class, text}, attribute:"
+            " 'checked', expected: false}). All-satisfied suppresses further"
+            " actions and may close the run; any-unsatisfied rejects a"
+            " 'completed' report; unknown defers to the final check. Declare"
+            " only conditions that jointly define task success."
+        ),
+    )
     model_config = {"extra": "allow"}
 
 

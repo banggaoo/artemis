@@ -306,6 +306,9 @@ class Agent(AgentBase):
             enable_committee=self._config.enable_committee,
             committee_debate_rounds=self._config.committee_debate_rounds,
             disable_outputter=self._config.disable_outputter,
+            goal_invariants=list(
+                getattr(self._config.flash, "goal_invariants", None) or []
+            ),
             outputter=self._config.outputter,
             explorer=self._config.explorer,
             explorer_versions=self._config.explorer_versions,
