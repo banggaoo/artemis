@@ -1166,7 +1166,7 @@ class FlashRunner:
         verdicts and unmet subgoals for feedback on rejection.
         """
         if self._goal_invariants:
-            elements = getattr(state, "indexed_elements", None) or []
+            elements = await self._fresh_invariant_elements(state)
             report = evaluate_invariants(self._goal_invariants, elements)
             if report["verdict"] == "unsatisfied":
                 logger.info("Completion rejected: declared invariant unsatisfied.")
@@ -1273,6 +1273,31 @@ class FlashRunner:
         if obs.elements_text:
             xml_list = obs.elements_text
         return screenshot_bytes or img_bytes, xml_list
+
+    async def _fresh_invariant_elements(self, state: State | None) -> list:
+        """Re-observes the screen before evaluating declared goal invariants.
+
+        Post-action captures race UI transitions — a theme toggle applies
+        after the ~0.4 s capture delay, so ``state.indexed_elements`` can
+        hold the pre-action state for the whole next turn (observed live:
+        four allowed taps ping-ponged the dark-theme switch because every
+        pre-action check read the lagged ``checked``). Invariant decisions
+        — suppress an action, release a completion — need the settled
+        truth, and a fresh dump is cheap next to the model call that just
+        ran. Falls back to the last captured elements on failure.
+        """
+        elements = getattr(state, "indexed_elements", None) or []
+        try:
+            obs, _ = await observe(self.ctx, self.controller)
+        except Exception as obs_err:
+            logger.warning(f"Invariant re-observation failed: {obs_err}")
+            return elements
+        if obs.ok and obs.hierarchy_ok:
+            elements = obs.elements
+            if state is not None:
+                state.indexed_points = [el["center"] for el in elements]
+                state.indexed_elements = elements
+        return elements
 
     def _extract_normalized_coordinates(self, name: str, args: dict, resolved=None):
         """Extracts and enriches coordinate metadata for the recorded action.
@@ -2033,11 +2058,20 @@ class FlashRunner:
             # the model to report; after enough ignored notices the verified
             # conditions close the run themselves.
             if self._goal_invariants:
-                inv_report = evaluate_invariants(self._goal_invariants, elements_now)
                 has_report_call = any(
                     str(tc.get("name") or "").split(":")[-1] == "report_task_status"
                     for tc in tool_calls
                 )
+                # A report call defers to the completion gate (which re-
+                # observes itself); otherwise re-observe now — the elements
+                # snapshot above comes from the post-action capture, which
+                # can lag a still-applying transition by a whole turn.
+                inv_elements = (
+                    elements_now
+                    if has_report_call
+                    else await self._fresh_invariant_elements(state)
+                )
+                inv_report = evaluate_invariants(self._goal_invariants, inv_elements)
                 if inv_report["verdict"] == "satisfied" and not has_report_call:
                     satisfied_suppression_streak += 1
                     logger.info(
