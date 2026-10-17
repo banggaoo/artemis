@@ -56,6 +56,7 @@ from artemis.utils.coordinates import (
     compute_smart_swipe_coordinates,
     parse_swipe_parameters,
 )
+from artemis.utils.element_hit_test import find_element_at_point
 from artemis.utils.notes import (
     format_list_notes_failure,
     format_list_notes_success,
@@ -178,11 +179,23 @@ class McpActionExecutor:
                 wire_name, wire_args, finalize, target_semantics = self._translate(
                     raw_name, args, state, index_elements=index_elements
                 )
-                desc_note = self._description_mismatch_note(
-                    args,
-                    target_semantics,
-                    self._index_elements(state, index_elements),
-                )
+                action_elements = self._index_elements(state, index_elements)
+                if (
+                    raw_name in _POINT_TARGET_ACTIONS
+                    and not target_semantics.get("target_text")
+                ):
+                    # Coordinate target: the model picked a point, so resolve
+                    # what is actually under it for the same feedback path an
+                    # index target gets.
+                    desc_note = self._coordinate_target_note(
+                        args, wire_args.get("target"), action_elements
+                    )
+                else:
+                    desc_note = self._description_mismatch_note(
+                        args,
+                        target_semantics,
+                        action_elements,
+                    )
                 if raw_name in _POINT_TARGET_ACTIONS:
                     # The normalized point the action was sent to: the recorded
                     # coordinates of an index target (the model named an index,
@@ -539,11 +552,7 @@ class McpActionExecutor:
         text = semantics.get("target_text")
         if not (isinstance(description, str) and description.strip()) or not text:
             return None
-        tokens = {
-            cls._DESC_DIGIT_WORDS.get(t, t)
-            for t in re.findall(r"[a-z0-9]+", description.lower())
-            if t not in cls._DESC_STOPWORDS
-        }
+        tokens = cls._description_tokens(description)
         if not tokens or any(t in text.lower() for t in tokens):
             return None
         rid = semantics.get("target_resource_id")
@@ -558,6 +567,151 @@ class McpActionExecutor:
         else:
             note += " Re-check the current element list if you meant a different element."
         return {"text": note, "suggestion": suggestion}
+
+    # Container classes a coordinate tap can "hit" without doing anything —
+    # the expanded alarm card is a CardView covering half the screen, and a
+    # tap on its body lands here instead of on the switch inside it.
+    _CONTAINER_CLASSES = frozenset(
+        {
+            "framelayout", "linearlayout", "relativelayout", "constraintlayout",
+            "viewgroup", "cardview", "recyclerview", "scrollview",
+            "nestedscrollview", "coordinatorlayout", "drawerlayout", "gridview",
+            "listview", "adapterview", "appbarlayout", "linearlayoutcompat",
+        }
+    )
+
+    # Widget words in a description pick a candidate by class — "toggle switch
+    # for 8:30 AM alarm" means the Switch among the several '8:30 AM alarm'
+    # labelled nodes, not the CardView sharing every one of its tokens.
+    _DESC_CLASS_WORDS = {
+        "switch": "switch", "toggle": "switch", "checkbox": "checkbox",
+        "radio": "radio", "slider": "seekbar", "seekbar": "seekbar",
+        "field": "edittext", "input": "edittext", "search": "edittext",
+        "button": "button", "tab": "tab",
+    }
+
+    @classmethod
+    def _description_tokens(cls, description: str) -> set[str]:
+        return {
+            cls._DESC_DIGIT_WORDS.get(t, t)
+            for t in re.findall(r"[a-z0-9]+", description.lower())
+            if t not in cls._DESC_STOPWORDS
+        }
+
+    @classmethod
+    def _confident_element_hint(
+        cls, tokens: set[str], description: str, elements: list[dict[str, Any]] | None
+    ) -> str | None:
+        """Names the single best element match, or None when ambiguous.
+
+        Scores each labelled element by how many description tokens it covers;
+        widget words in the description ("switch", "button", "field") first
+        filter candidates to the matching widget class, which separates "the
+        8:30 AM alarm switch" from the card and chevron carrying the same text.
+        A hint is returned only when one candidate uniquely out-scores the rest.
+        """
+        if not elements or not tokens:
+            return None
+        class_words = {
+            cls._DESC_CLASS_WORDS[t]
+            for t in re.findall(r"[a-z]+", description.lower())
+            if t in cls._DESC_CLASS_WORDS
+        }
+        scored: list[tuple[int, Any, str, dict[str, Any]]] = []
+        for pos, el in enumerate(elements):
+            label = str(el.get("text") or "").strip()
+            if not label:
+                continue
+            lower = label.lower()
+            score = sum(
+                1 for t in tokens if t == lower or (len(t) > 1 and t in lower)
+            )
+            if score:
+                scored.append((score, el.get("index", pos + 1), label, el))
+        if not scored:
+            return None
+        if class_words:
+            preferred = [
+                entry
+                for entry in scored
+                if any(
+                    w in str(entry[3].get("class") or "").rsplit(".", 1)[-1].lower()
+                    for w in class_words
+                )
+            ]
+            if preferred:
+                scored = preferred
+        best = max(entry[0] for entry in scored)
+        tops = [entry for entry in scored if entry[0] == best]
+        if len(tops) != 1:
+            return None
+        _, idx, label, _el = tops[0]
+        return f"[{idx}] '{label}'"
+
+    def _coordinate_target_note(
+        self,
+        args: dict[str, Any],
+        target_norm: Any,
+        elements: list[dict[str, Any]] | None,
+    ) -> dict[str, str] | None:
+        """Evaluates a coordinate tap against what actually sits under the point.
+
+        For index targets ``target_description`` is checked against the resolved
+        element; a coordinate target has no resolved element, so hit-test the
+        point against the same indexed list:
+
+        * a leaf-element hit is checked against the description like an index
+          resolution (the element under the point *is* the resolved target);
+        * a hit on a layout container, or on nothing listed, cannot perform the
+          described action — reject with a hint when the description identifies
+          one element confidently, else only note the likely dead tap;
+        * a container hit whose own label matches the description is left alone
+          (many actionable targets, e.g. dial-pad keys, are FrameLayouts).
+        """
+        description = args.get("target_description")
+        if not (isinstance(description, str) and description.strip()):
+            return None
+        if not (isinstance(target_norm, (list, tuple)) and len(target_norm) == 2):
+            return None
+        width, height = self._screen_size()
+        x_px = int(target_norm[0]) * width // 1000
+        y_px = int(target_norm[1]) * height // 1000
+        hit, _source = find_element_at_point(elements, x_px, y_px)
+        description = description.strip()
+        tokens = self._description_tokens(description)
+        if hit is not None:
+            cls_name = str(hit.get("class") or "").rsplit(".", 1)[-1].lower()
+            if cls_name not in self._CONTAINER_CLASSES:
+                return self._description_mismatch_note(
+                    args,
+                    {
+                        "target_text": hit.get("text"),
+                        "target_resource_id": hit.get("resource_id"),
+                    },
+                    elements,
+                )
+            hit_label = str(hit.get("text") or "").strip().lower()
+            if tokens and any(t in hit_label for t in tokens):
+                class_words = {
+                    self._DESC_CLASS_WORDS[t]
+                    for t in re.findall(r"[a-z]+", description.lower())
+                    if t in self._DESC_CLASS_WORDS
+                }
+                if not class_words or any(w in cls_name for w in class_words):
+                    return None
+            what = f"the '{hit.get('text')}' {cls_name} container"
+        else:
+            what = "no listed element"
+        suggestion = self._confident_element_hint(tokens, description, elements)
+        note = (
+            f"[NOTE] [{target_norm[0]}, {target_norm[1]}] lands on {what}, which"
+            f" cannot perform '{description}'."
+        )
+        if suggestion:
+            note += f" The element matching '{description}' is {suggestion}."
+            return {"text": note, "suggestion": suggestion}
+        note += " Re-aim at the intended element or use its index from the list."
+        return {"text": note, "suggestion": None}
 
     @staticmethod
     def _matching_element_hint(

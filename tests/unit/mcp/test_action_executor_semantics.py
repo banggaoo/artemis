@@ -528,6 +528,177 @@ def test_mismatch_note_never_fires_for_coordinate_targets():
     assert note is None
 
 
+def _alarm_state():
+    """The expanded DeskClock alarm card observed live: the switch sits inside
+    a CardView that fills the list row — taps on the card body hit the
+    container, not the control."""
+    state = _state()
+    state.indexed_elements = [
+        {
+            "index": 1,
+            "center": [540, 923],
+            "text": "8:30 AM Alarm",
+            "bounds": [42, 317, 1038, 1529],
+            "class": "androidx.cardview.widget.CardView",
+            "resource_id": None,
+            "is_ocr": False,
+        },
+        {
+            "index": 2,
+            "center": [943, 380],
+            "text": "Collapse 8:30 AM alarm",
+            "bounds": [891, 317, 996, 443],
+            "class": "android.widget.ImageButton",
+            "resource_id": None,
+            "is_ocr": False,
+        },
+        {
+            "index": 3,
+            "center": [923, 689],
+            "text": "8:30 AM alarm",
+            "bounds": [850, 626, 996, 752],
+            "class": "android.widget.Switch",
+            "resource_id": None,
+            "is_ocr": False,
+        },
+        {
+            "index": 4,
+            "center": [923, 1838],
+            "text": "9:00 AM alarm",
+            "bounds": [850, 1775, 996, 1901],
+            "class": "android.widget.Switch",
+            "resource_id": None,
+            "is_ocr": False,
+        },
+    ]
+    state.indexed_points = [el["center"] for el in state.indexed_elements]
+    return state
+
+
+def test_coordinate_tap_on_a_leaf_checked_against_its_real_text():
+    """A point inside the 'JKL' cell is the same resolution as clicking its
+    index — 'the 1 key' narrated over it is a mismatch naming '1'."""
+    executor = _make_executor()
+    state = _dialer_state()
+    state.indexed_elements.append(
+        {
+            "index": 4,
+            "center": [500, 960],
+            "text": "1",
+            "bounds": [450, 920, 550, 1000],
+            "class": "android.widget.TextView",
+            "resource_id": "com.google.android.dialer:id/dialpad_key_number",
+            "is_ocr": False,
+        }
+    )
+    state.indexed_points.append([500, 960])
+    note = executor._coordinate_target_note(
+        {"target_description": "the 1 key"}, [166, 600], state.indexed_elements
+    )
+    assert note is not None
+    assert "'JKL'" in note["text"]
+    assert "[4] '1'" in note["text"]
+
+
+def test_coordinate_tap_inside_the_described_element_stays_quiet():
+    """The point lands inside the switch the description names — nothing to
+    correct."""
+    executor = _make_executor()
+    state = _alarm_state()
+    # [923,689]px is the switch center → normalized [855,287] on 1080x2400.
+    assert executor._coordinate_target_note(
+        {"target_description": "Toggle switch for 8:30 AM alarm"},
+        [855, 287],
+        state.indexed_elements,
+    ) is None
+
+
+def test_coordinate_tap_on_the_card_body_rejects_with_the_switch_index():
+    """The live alarm failure: [873,351] normalized lands on the expanded
+    CardView, not the switch — 'toggle switch' picks the Switch class out of
+    three identically-labelled candidates."""
+    executor = _make_executor()
+    note = executor._coordinate_target_note(
+        {"target_description": "Toggle switch for 8:30 AM alarm"},
+        [873, 351],
+        _alarm_state().indexed_elements,
+    )
+    assert note is not None
+    assert "container" in note["text"]
+    assert note["suggestion"] == "[3] '8:30 AM alarm'"
+
+
+def test_coordinate_tap_on_dead_space_rejects_with_the_named_element():
+    """Nothing listed under the point and the description identifies exactly
+    one element — refuse the tap and name it."""
+    executor = _make_executor()
+    state = _dialer_state()
+    state.indexed_elements.append(
+        {
+            "index": 4,
+            "center": [500, 960],
+            "text": "1",
+            "bounds": [450, 920, 550, 1000],
+            "class": "android.widget.TextView",
+            "resource_id": "com.google.android.dialer:id/dialpad_key_number",
+            "is_ocr": False,
+        }
+    )
+    state.indexed_points.append([500, 960])
+    note = executor._coordinate_target_note(
+        {"target_description": "the 1 key"}, [500, 100], state.indexed_elements
+    )
+    assert note is not None
+    assert note["suggestion"] == "[4] '1'"
+
+
+def test_coordinate_tap_on_dead_space_without_a_confident_match_only_notes():
+    """A vague description can't prove the point wrong — soft note, no
+    suggestion, so the tap still proceeds."""
+    executor = _make_executor()
+    note = executor._coordinate_target_note(
+        {"target_description": "the green button"},
+        [500, 100],
+        _dialer_state().indexed_elements,
+    )
+    assert note is not None
+    assert note["suggestion"] is None
+    assert "no listed element" in note["text"]
+
+
+def test_coordinate_tap_on_a_container_matching_its_description_stays_quiet():
+    """Dial-pad keys are clickable FrameLayouts — a tap inside '5,JKL'
+    described as 'the 5 key' is a container hit that agrees with the
+    description and must not be flagged."""
+    executor = _make_executor()
+    # [60,1480]px is inside the FrameLayout but outside both child labels.
+    assert executor._coordinate_target_note(
+        {"target_description": "the 5 key"}, [55, 616], _dialer_state().indexed_elements
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_a_coordinate_tap_landing_on_a_container():
+    """End to end: the described switch is findable while the point lands on
+    the alarm card — the tap must not reach the device."""
+    from unittest.mock import AsyncMock, patch
+
+    executor = _make_executor()
+    state = _alarm_state()
+    state.latest_screenshot = None
+    session = AsyncMock()
+    with patch.object(executor, "_session_or_start", return_value=session):
+        result = await executor.execute(
+            "click",
+            {"target": [873, 351], "target_description": "Toggle switch for 8:30 AM alarm"},
+            "tc",
+            state,
+        )
+    session.call.assert_not_called()
+    assert result.status == "error"
+    assert "[3] '8:30 AM alarm'" in result.text_summary
+
+
 @pytest.mark.asyncio
 async def test_execute_rejects_the_tap_when_a_confident_alternative_exists():
     """'1 key' narrated over an index resolving to 'JKL' while a '1' element is
