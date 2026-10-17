@@ -72,6 +72,13 @@ class ExecutionSetup(ExecutionSetupBase):
     enable_committee: bool = False
     committee_debate_rounds: int = 2
     disable_outputter: bool = False
+    goal_invariants: list[dict[str, Any]] = Field(default_factory=list)
+    """Declarative terminal-state conditions for the Flash runner
+    (``artemis.agents.flash.state_predicates``). Evaluated against live
+    element dicts: all ``satisfied`` → the loop may close early and a
+    'completed' report is released; any ``unsatisfied`` → a 'completed'
+    report is rejected with evidence; ``unknown`` → falls through to the
+    model final check. Declare only conditions that jointly define success."""
     outputter: OutputterConfig = Field(default_factory=OutputterConfig)
     explorer: ExplorerConfig = Field(default_factory=ExplorerConfig)
     explorer_versions: dict[str, str] = Field(default_factory=dict)

@@ -80,6 +80,10 @@ from artemis.graph.state import State
 from artemis.llm.router import ModelProvider
 from artemis.llm.structured import ParseFailure, parse_structured
 from artemis.core.decision_client import DecisionClient
+from artemis.agents.flash.state_predicates import (
+    describe_failures,
+    evaluate_invariants,
+)
 from artemis.mcp.action_executor import McpActionExecutor
 from artemis.utils.image_codec import image_data_uri
 from artemis.mcp.observation import observe
@@ -313,6 +317,10 @@ class FlashRunner:
         # has already rejected this run.
         self._plan_text: str | None = None
         self._completion_rejections = 0
+        # Declared success conditions (execution_setup.goal_invariants): when
+        # every one evaluates satisfied against the live element list the run
+        # may close early; an unsatisfied one vetoes 'completed' reports.
+        self._goal_invariants: list[dict] = []
         # One-line "last action → outcome" fed into the decision model's
         # state: Laya has no transcript view, so without it a dead tap and
         # real progress look identical.
@@ -475,11 +483,21 @@ class FlashRunner:
 
     @staticmethod
     def _element_signature(elements) -> frozenset:
-        """(label, center) set used to tell whether the screen actually changed."""
+        """(label, center, state) set used to tell whether the screen changed.
+
+        ``checked``/``enabled`` join the identity so a toggle flipping
+        ON→OFF counts as a screen change — with geometry alone the dead-tap
+        machinery treated a working switch tap as a no-op (observed live:
+        the Dark theme switch flipped while the signature stayed identical).
+        Volatile attributes (``focused``/``selected``) are excluded: focus
+        moves on scroll/hover and would fake 'changed' on dead taps.
+        """
         return frozenset(
             (
                 FlashRunner._element_label(el),
                 tuple(el.get("center") or ()),
+                el.get("checked"),
+                el.get("enabled"),
             )
             for el in elements
         )
@@ -1127,11 +1145,18 @@ class FlashRunner:
         except Exception as step_err:
             logger.warning(f"Error recording terminal step in FlashRunner: {step_err}")
 
-    async def _verify_completion(self) -> tuple[bool, str]:
+    async def _verify_completion(self, state: State) -> tuple[bool, str]:
         """Terminal-boundary check on a 'completed' report_task_status claim.
 
-        Runs the Pro final review — final screenshot, element list, and the
-        enumerated read-only device probes — so the release decision rests on
+        Declared ``goal_invariants`` run first and are authoritative:
+        ``unsatisfied`` is a deterministic contradiction and rejects the
+        claim regardless of checker gates; all-``satisfied`` releases it
+        (the invariants are the declared definition of done); ``unknown``
+        falls through to the model final check — or fail-open when that
+        check is disabled.
+
+        The final review — final screenshot, element list, and the
+        enumerated read-only device probes — then judges the goal from
         device state rather than the agent's narration (observed live: a
         double tap netted zero on the dark-theme switch, then the model
         reported completed). Fail-open on checker errors: a broken verifier
@@ -1140,6 +1165,17 @@ class FlashRunner:
         Returns ``(allowed, findings)``; ``findings`` lists failed verify
         verdicts and unmet subgoals for feedback on rejection.
         """
+        if self._goal_invariants:
+            elements = getattr(state, "indexed_elements", None) or []
+            report = evaluate_invariants(self._goal_invariants, elements)
+            if report["verdict"] == "unsatisfied":
+                logger.info("Completion rejected: declared invariant unsatisfied.")
+                return False, describe_failures(report)
+            if report["verdict"] == "satisfied":
+                logger.info("Completion released: declared invariants satisfied.")
+                return True, ""
+            # unknown: insufficient evidence — defer to the model check.
+
         setup = getattr(self.ctx, "execution_setup", None)
         if not (setup and getattr(setup, "final_check_enabled", False)):
             return True, ""
@@ -1580,7 +1616,7 @@ class FlashRunner:
                 # is spent, the report is finalized as failed — a blocked
                 # outcome, mirroring the Pro graph.
                 if args.get("status") == "completed":
-                    allowed, findings = await self._verify_completion()
+                    allowed, findings = await self._verify_completion(state)
                     if not allowed:
                         self._completion_rejections += 1
                         setup = getattr(self.ctx, "execution_setup", None)
@@ -1757,6 +1793,13 @@ class FlashRunner:
             and getattr(decision_cfg, "enabled", False)
             and getattr(decision_cfg, "flash_loop", False)
         )
+        setup = getattr(self.ctx, "execution_setup", None)
+        self._goal_invariants = list(getattr(setup, "goal_invariants", None) or [])
+        if self._goal_invariants:
+            logger.info(
+                f"Goal invariants armed: {len(self._goal_invariants)} declared"
+                " condition(s) gate completion and may close the run early."
+            )
         tools_declaration = self._get_tools()
         report_only_tools = [t for t in tools_declaration if t.name == "report_task_status"]
 
@@ -1799,6 +1842,13 @@ class FlashRunner:
         # from two turns ago on a matching screen.
         call_sig_history: list[str] = []
         pre_sig_history: list[frozenset] = []
+        # How many turns in a row action calls were suppressed because the
+        # declared goal invariants already held on the live screen. Bounded
+        # like the other streaks: after the model ignores the notice a few
+        # times, the verified conditions close the run instead of letting a
+        # redundant action undo them (observed live: the 'dark theme off'
+        # run toggled a satisfied switch back on).
+        satisfied_suppression_streak = 0
 
         while limit is None or turns < limit:
             turns += 1
@@ -1974,6 +2024,75 @@ class FlashRunner:
                 if key.startswith("tap_"):
                     idx = int(key[len("tap_"):])
                     tap_records.append((idx, label_by_idx.get(idx, "")))
+
+            # Declared-invariant short-circuit: when every goal invariant is
+            # verified satisfied on the live screen, further actions can only
+            # risk undoing the achieved state. Suppress the action calls
+            # (a report_task_status in the set still goes through — the
+            # completion gate will release it on the same evidence) and tell
+            # the model to report; after enough ignored notices the verified
+            # conditions close the run themselves.
+            if self._goal_invariants:
+                inv_report = evaluate_invariants(self._goal_invariants, elements_now)
+                has_report_call = any(
+                    str(tc.get("name") or "").split(":")[-1] == "report_task_status"
+                    for tc in tool_calls
+                )
+                if inv_report["verdict"] == "satisfied" and not has_report_call:
+                    satisfied_suppression_streak += 1
+                    logger.info(
+                        "Suppressing actions: declared goal invariants already"
+                        f" satisfied ({satisfied_suppression_streak}/3)."
+                    )
+                    notice = (
+                        "[NOTICE] The declared goal conditions are already"
+                        " satisfied on the current screen. Do not act further"
+                        " — call report_task_status('completed')."
+                    )
+                    for tc in tool_calls:
+                        messages.append(
+                            ToolMessage(
+                                tool_call_id=tc.get("id") or str(uuid.uuid4()),
+                                name=str(tc.get("name") or ""),
+                                content=json.dumps(
+                                    {
+                                        "status": "error",
+                                        "error": (
+                                            "Goal conditions already satisfied;"
+                                            " action not executed. Report"
+                                            " task status instead."
+                                        ),
+                                    }
+                                ),
+                                status="error",
+                            )
+                        )
+                    if satisfied_suppression_streak >= 3:
+                        ledger.stage_turn(messages[turn_base:])
+                        if self.summarizer:
+                            await self.summarizer.flush()
+                        return {
+                            "status": "completed",
+                            "explanation": (
+                                "Declared goal conditions verified satisfied"
+                                " on device state: "
+                                + ", ".join(
+                                    str(r.get("predicate_id") or "invariant")
+                                    for r in inv_report["results"]
+                                )
+                            ),
+                        }
+                    pending_notices.append(notice)
+                    (
+                        current_pre_screenshot_bytes,
+                        current_xml_list,
+                    ) = await self._refresh_idle_observation(
+                        state, current_pre_screenshot_bytes, current_xml_list
+                    )
+                    ledger.stage_turn(messages[turn_base:])
+                    previous_turn = _TurnRecord()
+                    continue
+                satisfied_suppression_streak = 0
 
             # Dead-verbatim suppression: when this turn's call set is identical
             # to the previous turn's and that turn changed nothing, executing
