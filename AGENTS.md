@@ -167,3 +167,18 @@ current empirical baseline before proposing model additions:
   app is force-stopped before their async write flushes. Final-state
   oracles should read the run's last live capture (dumps only as
   fallback) and never follow a `force-stop`.
+- Oct 18: 102-run complex-UI campaign (17 task families × 6 seeds,
+  resumable driver, trace-primary oracle with dump-vote
+  corroboration): **54/102 = 52.9% verified end-to-end** by local
+  Gemma 4 E4B. Per-family rates: alarm toggles 6/6 both directions,
+  dial_911 5/6, dark theme on/off 5/6 each, stopwatch 5/6,
+  appinfo_chrome 5/6, nav_battery 4/6, settings_search 4/6,
+  battery_pct_on 2/6 (system-setting oracle), sms_5550155 2/6,
+  7-digit dials 1/6 each, nav_sound/nav_storage 1/6, sms_1234567 0/6.
+  Failure mix: timeout 25, claimed-without-state 14 (all rejected by
+  the oracle — e.g. sms_1234567 claimed done 6/6 while never picking
+  the "Send to" suggestion), dead-tap escalations 7, runner_failed 2.
+  `oracle_disagreement` fired 29× — post-run dumps genuinely disagree
+  with live trace state often enough that a single-source oracle
+  would mis-score runs. Harness: `tests/integration/flash_live/`
+  (env-parameterized; `python spec.py` once, then `run_batch.py`).
