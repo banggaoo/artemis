@@ -41,6 +41,7 @@ import asyncio
 import base64
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 import re
 import uuid
@@ -886,10 +887,6 @@ class FlashRunner:
         blocks: list[dict] = [
             {"type": "text", "text": f"# CURRENT OBSERVATION [{ledger.elapsed_label()}]"}
         ]
-        if img_bytes:
-            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-            blocks.append({"type": "text", "text": "--- Current Screenshot ---"})
-            blocks.append({"type": "image_url", "image_url": {"url": image_data_uri(img_b64)}})
         if xml_list:
             blocks.append({"type": "text", "text": f"{PRO_UI_LIST_MARKER}\n{xml_list}"})
         ephemeral: list[int] = []
@@ -908,6 +905,13 @@ class FlashRunner:
             if is_ephemeral:
                 ephemeral.append(len(blocks))
             blocks.append({"type": "text", "text": text})
+        # The screenshot goes last so intermediate-image pruning removes a
+        # trailing span: the surviving text prefix stays byte-identical across
+        # turns, which prefix-caching servers (APC) can then reuse.
+        if img_bytes:
+            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+            blocks.append({"type": "text", "text": "--- Current Screenshot ---"})
+            blocks.append({"type": "image_url", "image_url": {"url": image_data_uri(img_b64)}})
         tail = HumanMessage(content=blocks)
         if ephemeral:
             mark_ephemeral(tail, ephemeral)
@@ -1596,6 +1600,29 @@ class FlashRunner:
         # Keep only the latest screenshot: strict gateways cap images per
         # request, and earlier frames are stale context anyway.
         self._prune_intermediate_screenshots(messages)
+        if os.environ.get("ARTEMIS_DEBUG_PROMPTS"):
+            # Per-turn prompt digests: [msg_type, per-block (kind,len,hash)]
+            # so prefix-cache divergence points can be localized by diffing.
+            import hashlib
+            import json as _json
+
+            dump_path = Path(os.environ["ARTEMIS_DEBUG_PROMPTS"])
+            digest = []
+            for msg in messages:
+                blocks = msg.content if isinstance(msg.content, list) else [{"type": "text", "text": msg.content}]
+                digest.append([
+                    getattr(msg, "type", "?"),
+                    [
+                        (
+                            b.get("type", "?"),
+                            len(str(b.get("text") or b.get("image_url") or "")),
+                            hashlib.md5(str(b).encode()).hexdigest()[:8],
+                        )
+                        for b in blocks
+                    ],
+                ])
+            with dump_path.open("a") as fh:
+                fh.write(_json.dumps(digest) + "\n")
         # Bind active tools. Local OpenAI-compatible servers (mlx_vlm and
         # friends) may let the model answer with narration only, which the
         # loop reads as a no-progress turn; tool_choice="required" holds the

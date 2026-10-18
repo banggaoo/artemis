@@ -182,3 +182,23 @@ current empirical baseline before proposing model additions:
   with live trace state often enough that a single-source oracle
   would mis-score runs. Harness: `tests/integration/flash_live/`
   (env-parameterized; `python spec.py` once, then `run_batch.py`).
+- Oct 18: APC (automatic prefix caching) on the local `mlx_vlm.server`
+  — `APC_ENABLED=1`, `APC_EXACT_CACHE_ENTRIES=8`. Stock APC salts every
+  block with the request's media hash, so a fresh screenshot each turn
+  made reuse exactly 0. Vendored patch adds a media-free companion salt
+  (`image_hash=0`) with checkpoints stored at (a) the last Gemma
+  turn-start (`<|turn>` id 105) before the first media span and (b) the
+  first-media boundary itself; lookups fall back to the media-free salt
+  bounded at first-media-start (causally valid: pre-image text KV
+  cannot see the image). To make the transcript prefix-stable, the
+  observation's screenshot is now the LAST content block — pruning then
+  removes a trailing span instead of a mid-message one. Measured on
+  real turns: `cached_tokens≈5231/~8000` (~65% reuse; the cap is the
+  strip of the second-newest observation each turn), prefill
+  16–19s→6–10s, turn cadence ~40–45s→~12–15s. `nav_battery` and a live
+  dialer run verified correct on the patched server. Diagnostics:
+  `MLXVLM_APC_DEBUG=1` (server) and `ARTEMIS_DEBUG_PROMPTS=<path>`
+  (per-turn per-block prompt digests for divergence localization).
+  Deeper reuse needs media-aware checkpoints over retained images —
+  deferred; the strip-point cap is structural while old observations
+  are rewritten.
