@@ -202,3 +202,15 @@ current empirical baseline before proposing model additions:
   Deeper reuse needs media-aware checkpoints over retained images —
   deferred; the strip-point cap is structural while old observations
   are rewritten.
+- Oct 18: APC + 900s-budget re-run (17 families × 2 seeds, same
+  suite_spec/oracles): **23/34 = 67.6% verified** vs the 52.9%
+  pre-APC baseline. Zero timeouts — with 900s budgets the wall clock
+  can never fire before `max_turns=18`; wandering runs now end as
+  honest `runner_failed` status (model self-reports after exhausting
+  productive actions) instead of being cancelled mid-flight. Per-family
+  at 2/2: alarms both directions, appinfo, battery_pct, both dark
+  themes, dial_911, nav_battery, settings_search, stopwatch. Residual
+  failures concentrate exactly where the plan-level limit already
+  showed: 7-digit dials 0/6 (`55500155`/`555055` accumulation),
+  sms_1234567 0/2 (claimed while "Send to" suggestion untapped),
+  nav_sound/nav_storage 1/2 (post-launch confusion).
