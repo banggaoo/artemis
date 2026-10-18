@@ -192,9 +192,13 @@ def test_observation_tail_has_pro_shape(mock_context):
         tail = runner._build_tail(ledger, 1, b"IMG", "[1] Settings")
         texts = [b["text"] for b in tail.content if b["type"] == "text"]
         assert OBSERVATION_HEADER_RE.match(texts[0])
-        assert texts[1] == "--- Current Screenshot ---"
-        assert texts[2] == f"{PRO_UI_LIST_MARKER}\n[1] Settings"
+        assert texts[1] == f"{PRO_UI_LIST_MARKER}\n[1] Settings"
+        assert texts[2] == "--- Current Screenshot ---"
         assert len(texts) == 3
+        # The screenshot is the final block: intermediate-image pruning then
+        # removes a trailing span and the surviving text prefix stays
+        # byte-identical across turns for prefix-cache reuse.
+        assert tail.content[-1]["type"] == "image_url"
         assert sum(1 for b in tail.content if b["type"] == "image_url") == 1
         joined = "".join(texts)
         assert "Open Settings" not in joined and "objective" not in joined.lower()
@@ -242,16 +246,18 @@ def test_per_turn_notices_are_marked_ephemeral(mock_context):
         previous_turn_silent=True,
     )
     texts = [b.get("text") for b in tail.content]
-    # header, screenshot label, image, UI list, then the per-turn notices with
-    # the persistent instruction body right after its wrapper
-    assert texts[4:] == [
+    # header, UI list, then the per-turn notices with the persistent
+    # instruction body right after its wrapper; screenshot label + image close
+    # the message (image last so pruning removes a trailing span).
+    assert texts[2:7] == [
         "nudge",
         guidance.wrapper,
         guidance.body,
         _FINAL_TURN_WARNING,
         REASONING_REMINDER,
     ]
-    assert tail.additional_kwargs[EPHEMERAL_BLOCKS_KEY] == [4, 5, 7, 8]
+    assert texts[7] == "--- Current Screenshot ---" and texts[8] is None
+    assert tail.additional_kwargs[EPHEMERAL_BLOCKS_KEY] == [2, 3, 5, 6]
 
 
 def test_injected_instruction_body_outlives_its_wrapper(mock_context):
@@ -472,8 +478,8 @@ async def test_run_builds_prompt_from_ledger_with_session_offsets(mock_context):
     images = [b for b in tail2.content if b["type"] == "image_url"]
     assert len(images) == 1
     assert images[0]["image_url"]["url"].endswith(base64.b64encode(b"IMG-tc2").decode())
-    assert tail2_texts[1] == "--- Current Screenshot ---"
-    assert tail2_texts[2] == f"{PRO_UI_LIST_MARKER}\n[1] next"
+    assert tail2_texts[1] == f"{PRO_UI_LIST_MARKER}\n[1] next"
+    assert tail2_texts[2] == "--- Current Screenshot ---"
     assert len(turn2_messages) == 6
 
     # Both actions of the multi-action turn were registered on the committed turn.
