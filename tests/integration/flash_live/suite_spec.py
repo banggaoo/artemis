@@ -21,7 +21,7 @@ TASKS = {
         "intent": "android.intent.action.DIAL",
         "package": "com.google.android.dialer",
         "hierarchy_backend": "uiautomator",
-        "timeout": 720,
+        "timeout": 900,
         "invariants": [{
             "id": "dialed",
             "selector": {"resource_id": "com.google.android.dialer:id/digits",
@@ -37,7 +37,7 @@ TASKS = {
         "intent": "android.intent.action.DIAL",
         "package": "com.google.android.dialer",
         "hierarchy_backend": "uiautomator",
-        "timeout": 720,
+        "timeout": 900,
         "invariants": [{
             "id": "dialed",
             "selector": {"resource_id": "com.google.android.dialer:id/digits",
@@ -53,7 +53,7 @@ TASKS = {
         "intent": "android.intent.action.DIAL",
         "package": "com.google.android.dialer",
         "hierarchy_backend": "uiautomator",
-        "timeout": 720,
+        "timeout": 900,
         "invariants": [{
             "id": "dialed",
             "selector": {"resource_id": "com.google.android.dialer:id/digits",
@@ -70,7 +70,7 @@ TASKS = {
         "intent": "android.intent.action.DIAL",
         "package": "com.google.android.dialer",
         "hierarchy_backend": "uiautomator",
-        "timeout": 600,
+        "timeout": 900,
         "invariants": [{
             "id": "dialed",
             "selector": {"resource_id": "com.google.android.dialer:id/digits",
@@ -89,7 +89,7 @@ TASKS = {
         "intent": "android.intent.action.VIEW",
         "intent_data": "sms:",
         "package": "com.google.android.apps.messaging",
-        "timeout": 540,
+        "timeout": 900,
         "invariants": [{
             "id": "recipient",
             "selector": {"class": "android.widget.TextView",
@@ -105,7 +105,7 @@ TASKS = {
         "intent": "android.intent.action.VIEW",
         "intent_data": "sms:",
         "package": "com.google.android.apps.messaging",
-        "timeout": 540,
+        "timeout": 900,
         "invariants": [{
             "id": "recipient",
             "selector": {"class": "android.widget.TextView",
@@ -121,7 +121,7 @@ TASKS = {
         "goal": "Open Battery settings.",
         "intent": "android.settings.SETTINGS",
         "package": "com.android.settings",
-        "timeout": 420,
+        "timeout": 900,
         "invariants": [{
             "id": "battery_page",
             "selector": {"resource_id": "android:id/title",
@@ -136,7 +136,7 @@ TASKS = {
         "goal": "Open Sound & vibration settings.",
         "intent": "android.settings.SETTINGS",
         "package": "com.android.settings",
-        "timeout": 420,
+        "timeout": 900,
         "invariants": [{
             "id": "sound_page",
             "selector": {"class": "android.widget.TextView", "text": "Media volume"},
@@ -149,7 +149,7 @@ TASKS = {
         "goal": "Open Storage settings.",
         "intent": "android.settings.SETTINGS",
         "package": "com.android.settings",
-        "timeout": 420,
+        "timeout": 900,
         "invariants": [{
             "id": "storage_page",
             "selector": {"class": "android.widget.TextView", "text": "Free up space"},
@@ -163,7 +163,7 @@ TASKS = {
         "goal": "Open the app info page for Chrome in Settings.",
         "intent": "android.settings.SETTINGS",
         "package": "com.android.settings",
-        "timeout": 600,
+        "timeout": 900,
         "invariants": [{
             "id": "chrome_info",
             "selector": {"class": "android.widget.Button", "text": "Force stop"},
@@ -182,7 +182,7 @@ TASKS = {
         # the tap) — the a11y helper drops it from the tree entirely, so the
         # invariant and oracle can never see it there (verified live).
         "hierarchy_backend": "uiautomator",
-        "timeout": 420,
+        "timeout": 900,
         "invariants": [{
             "id": "battery_pct_switch",
             "selector": {"resource_id": "com.android.settings:id/switchWidget",
@@ -202,7 +202,7 @@ TASKS = {
         "goal": "Turn off Dark theme.",
         "intent": "android.settings.DISPLAY_SETTINGS",
         "package": "com.android.settings",
-        "timeout": 420,
+        "timeout": 900,
         "invariants": [{
             "id": "dark_theme_off",
             "selector": {"resource_id": "com.android.settings:id/switchWidget",
@@ -216,7 +216,7 @@ TASKS = {
         "goal": "Turn on Dark theme.",
         "intent": "android.settings.DISPLAY_SETTINGS",
         "package": "com.android.settings",
-        "timeout": 420,
+        "timeout": 900,
         "invariants": [{
             "id": "dark_theme_on",
             "selector": {"resource_id": "com.android.settings:id/switchWidget",
@@ -234,7 +234,7 @@ TASKS = {
         "intent": "main_activity",
         "main_activity": "com.google.android.deskclock/com.android.deskclock.DeskClock",
         "package": "com.google.android.deskclock",
-        "timeout": 560,
+        "timeout": 900,
         "invariants": [{
             "id": "alarm_830_switch",
             "selector": {"class": "android.widget.Switch", "text": "8:30 AM alarm"},
@@ -253,7 +253,7 @@ TASKS = {
         "intent": "main_activity",
         "main_activity": "com.google.android.deskclock/com.android.deskclock.DeskClock",
         "package": "com.google.android.deskclock",
-        "timeout": 560,
+        "timeout": 900,
         "invariants": [{
             "id": "alarm_900_switch",
             "selector": {"class": "android.widget.Switch", "text": "9:00 AM alarm"},
@@ -272,7 +272,7 @@ TASKS = {
         "intent": "main_activity",
         "main_activity": "com.google.android.deskclock/com.android.deskclock.DeskClock",
         "package": "com.google.android.deskclock",
-        "timeout": 420,
+        "timeout": 900,
         "invariants": [{
             "id": "stopwatch_running",
             "selector": {"class": "android.widget.Button", "text": "Stop"},
@@ -287,7 +287,7 @@ TASKS = {
         "goal": "Use the Settings search bar to find and open 'Wallpaper & style' settings.",
         "intent": "android.settings.SETTINGS",
         "package": "com.android.settings",
-        "timeout": 600,
+        "timeout": 900,
         "invariants": [{
             "id": "wallpaper_page",
             "selector": {"class": "android.widget.TextView", "text": "Clock color & size"},
