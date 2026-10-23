@@ -345,6 +345,10 @@ def format_minimal_list_with_elements(
     added_items = []  # list of tuples: (text, cx, cy)
     items_bounds = []  # list of tuples: (idx, (left, top, right, bottom))
 
+    def state_token(value: Any) -> str:
+        token = str(value or "").strip().lower()
+        return token if token in ("true", "false") else "?"
+
     def normalize_bounds(left: int, top: int, right: int, bottom: int) -> str:
         n_left = int(max(0, min(1000, left * 1000 / width)))
         n_top = int(max(0, min(1000, top * 1000 / height)))
@@ -413,6 +417,16 @@ def format_minimal_list_with_elements(
             norm_bounds = normalize_bounds(left, top, right, bottom)
             kind = "Text" if text.strip() else "Hint"
             line = f"[{idx}] {kind}: '{shown}' | Bounds: {norm_bounds}"
+            # Explicit XML state for stateful controls: an ON and an OFF
+            # labeled Switch are otherwise identical text (#187). Absent or
+            # invalid attributes render as '?' — unknown, not implicitly OFF.
+            checkable = str(node.get("checkable") or "").strip().lower() == "true"
+            if checkable or node.get("checked") is not None:
+                line += " | " + " ".join(
+                    f"{a}:{state_token(node.get(a))}" for a in ("checked", "enabled")
+                )
+            elif str(node.get("enabled") or "").strip().lower() == "false":
+                line += " | enabled:false"
             if error:
                 line += f" | Error: '{error}'"
             lines.append(line)
@@ -427,6 +441,11 @@ def format_minimal_list_with_elements(
                 "resource_id": node.get("resource-id"),
                 "is_ocr": False,
             }
+            # Raw uiautomator state attributes, carried on the element for
+            # code-side verification (signatures, state predicates).
+            for state_attr in ("checked", "enabled", "selected", "package"):
+                if node.get(state_attr) is not None:
+                    element[state_attr] = node.get(state_attr)
             if not text.strip():
                 element["is_hint"] = True
             if error:
